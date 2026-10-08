@@ -1176,3 +1176,89 @@ async def test_long_lock_threshold_is_adjustable(dispatcher, session):
     await _enable_lock(dispatcher, ok_bot, "قفل طولانی")
     await feed(dispatcher, ok_bot, group_message("ا" * 1200, user_id=MEMBER_ID))
     assert ok_bot.restrict_chat_member.await_count == 0
+
+
+# --------------------------------------------------------------------------- #
+# «تگ همه» - mentioning every member of the group
+# --------------------------------------------------------------------------- #
+def _mention_bodies(bot) -> list[str]:
+    return [call.kwargs.get("text", "") for call in bot.send_message.await_args_list
+            if "tg://user?id=" in (call.kwargs.get("text") or "")]
+
+
+@pytest.mark.asyncio
+async def test_mention_all_mentions_every_known_member(dispatcher, monkeypatch):
+    """«تگ همه» mentions the members the bot has seen in this group."""
+    from app.services import mention_all as mention_service
+
+    mention_service._last_call.clear()
+
+    bot = build_fake_bot()
+    await feed(dispatcher, bot, group_message("سلام", user_id=MEMBER_ID))
+    await feed(dispatcher, bot, group_message("من هم هستم", user_id=PROMOTED_ADMIN_ID))
+    await feed(dispatcher, bot, group_message("تگ همه", user_id=OWNER_ID))
+
+    bodies = _mention_bodies(bot)
+    assert len(bodies) == 1, "everything must fit into a single message"
+    body = bodies[0]
+    for uid in (MEMBER_ID, PROMOTED_ADMIN_ID, OWNER_ID):
+        assert f'tg://user?id={uid}' in body, uid
+    assert len(body) <= 4096
+
+
+@pytest.mark.asyncio
+async def test_mention_all_includes_the_caller_in_a_fresh_group(dispatcher):
+    """A group where nobody has written yet still mentions the caller."""
+    from app.services import mention_all as mention_service
+
+    mention_service._last_call.clear()
+
+    bot = build_fake_bot()
+    await feed(dispatcher, bot, group_message("تگ همه", user_id=OWNER_ID))
+    bodies = _mention_bodies(bot)
+    assert bodies and f"tg://user?id={OWNER_ID}" in bodies[-1]
+
+
+@pytest.mark.asyncio
+async def test_mention_all_is_admin_only(dispatcher):
+    """Ordinary members must not be able to ping everybody."""
+    from app.services import mention_all as mention_service
+
+    mention_service._last_call.clear()
+
+    bot = build_fake_bot()
+    await feed(dispatcher, bot, group_message("سلام", user_id=MEMBER_ID))
+    await feed(dispatcher, bot, group_message("تگ همه", user_id=MEMBER_ID))
+    assert _mention_bodies(bot) == []
+    texts = [call.kwargs.get("text", "") for call in bot.send_message.await_args_list]
+    assert any("فقط برای مدیران" in text for text in texts), texts
+
+
+@pytest.mark.asyncio
+async def test_mention_all_has_a_cooldown(dispatcher):
+    """Calling it twice in a row is throttled."""
+    from app.services import mention_all as mention_service
+
+    mention_service._last_call.clear()
+
+    bot = build_fake_bot()
+    await feed(dispatcher, bot, group_message("سلام", user_id=MEMBER_ID))
+    await feed(dispatcher, bot, group_message("تگ همه", user_id=OWNER_ID))
+    await feed(dispatcher, bot, group_message("تگ همه", user_id=OWNER_ID))
+
+    assert len(_mention_bodies(bot)) == 1
+    texts = [call.kwargs.get("text", "") for call in bot.send_message.await_args_list]
+    assert any("⏳" in text for text in texts), texts
+
+
+def test_mention_all_splits_into_telegram_sized_messages():
+    """A huge member list is split instead of hitting the 4096 char limit."""
+    from app.services import mention_all as mention_service
+
+    members = [(1000 + index, "نام کاربر") for index in range(400)]
+    messages = mention_service.build_messages(members)
+    assert len(messages) > 1
+    for message in messages:
+        assert len(message) <= 4096
+    mentioned = sum(message.count("tg://user?id=") for message in messages)
+    assert mentioned == len(members)
