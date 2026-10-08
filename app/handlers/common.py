@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..core.errors import safe_delete, safe_send
 from ..core.normalization import normalize_text
 from ..db.models import User
-from ..keyboards.factory import InlineKeyboardMarkup
+from ..keyboards.factory import InlineKeyboardMarkup, cb, markup, primary, row
 from ..services.permissions import Actor, check_target
 from ..services.targeting import TargetResult, extract_duration_and_reason, resolve_target
 
@@ -173,6 +173,24 @@ async def require(ctx: CommandContext, *, role: str | None = None,
                 await ctx.reply(message + _status_hint(ctx.actor))
             return False
     return True
+
+
+# --------------------------------------------------------------------------- #
+# Undo buttons ("glass" buttons that reverse the action they belong to)
+# --------------------------------------------------------------------------- #
+UNDO_LABELS: dict[str, str] = {
+    "unmute": "↩️ لغو سکوت",
+    "unban": "↩️ رفع بن",
+    "unwarn": "↩️ کسر اخطار",
+    "demote": "↩️ عزل مدیر",
+    "deltag": "🗑 حذف تگ",
+}
+
+
+def undo_keyboard(action: str, user_id: int, label: str | None = None) -> InlineKeyboardMarkup:
+    """A single glass button that reverses the moderation action just taken."""
+    return markup([row(primary(label or UNDO_LABELS.get(action, "↩️ لغو"),
+                               cb("undo", action, user_id)))])
 
 
 async def ensure_bot_admin(ctx: CommandContext, *, permission: str = "restrict") -> bool:

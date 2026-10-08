@@ -21,6 +21,7 @@ from .common import (
     ensure_bot_admin,
     guard_target,
     require,
+    undo_keyboard,
     user_html,
 )
 from .registry import command
@@ -61,7 +62,7 @@ async def cmd_ban(ctx: CommandContext) -> None:
                               target_id=target.user_id, target_name=target.full_name,
                               duration=duration, reason=reason, delete_message_id=reply_id,
                               chat_title=ctx.chat_title, source="command")
-    await ctx.reply(text, reply_to=False)
+    await ctx.reply(text, reply_markup=undo_keyboard("unban", target.user_id), reply_to=False)
     await ctx.delete_invocation()
 
 
@@ -130,7 +131,8 @@ async def cmd_mute(ctx: CommandContext) -> None:
                                target_id=target.user_id, target_name=target.full_name,
                                duration=duration, reason=reason, delete_message_id=reply_id,
                                chat_title=ctx.chat_title)
-    await ctx.reply(text, reply_to=False)
+    await ctx.reply(text + "\n💡 یا با ریپلای بنویسید <code>لغو سکوت</code>",
+                    reply_markup=undo_keyboard("unmute", target.user_id), reply_to=False)
     await ctx.delete_invocation()
 
 

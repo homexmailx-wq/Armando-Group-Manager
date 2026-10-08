@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from ..core.normalization import normalize_text, to_persian_digits
+from ..services import chatlock
 from ..services import locks as lock_service
 from ..services.chat_state import get_settings, invalidate_settings
 from ..services.moderation import PUNISHMENT_OPTIONS_FA
@@ -199,3 +200,60 @@ async def cmd_porn_strictness(ctx: CommandContext) -> None:
     await lock_service.set_lock(ctx.session, ctx.chat_id, "porn", True, action=None,
                                 extra={"strictness": int(digits)}, updated_by=ctx.user_id)
     await ctx.reply(f"✅ شدت تشخیص محتوای مستهجن روی {to_persian_digits(digits)} تنظیم شد.")
+
+
+# --------------------------------------------------------------------------- #
+# Group-wide lock (Telegram chat permissions)
+# --------------------------------------------------------------------------- #
+async def _apply_group_lock(ctx: CommandContext, mode: str) -> None:
+    from ..services.permissions import bot_has_right
+
+    if not await require(ctx, role="admin", permission="restrict"):
+        return
+    if not await bot_has_right(ctx.bot, ctx.chat_id, "can_restrict_members"):
+        await ctx.reply("⚠️ برای قفل کردن گروه، ربات باید دسترسی «محدود کردن اعضا» "
+                        "(Restrict Members) را داشته باشد.\n"
+                        "تنظیمات گروه ← مدیران ← انتخاب ربات")
+        return
+    ok = await chatlock.apply_chat_lock(ctx.bot, ctx.chat_id, mode)
+    if not ok:
+        await ctx.reply("⚠️ تلگرام این تغییر را نپذیرفت؛ دسترسی ربات را بررسی کنید.")
+        return
+    hint = ("\n💡 برای باز کردن: <code>باز کردن گروه</code>" if mode != "off"
+            else "\n💡 برای قفل کامل: <code>قفل گروه</code>")
+    await ctx.reply(chatlock.MODE_MESSAGES[mode] + hint)
+
+
+@command("قفل گروه", "بستن گروه", "قفل چت", "لاک گروه", "قفل کل گروه",
+         role="admin", permission="restrict", category="locks",
+         description="قفل کردن کل گروه (فقط مدیران پیام بفرستند)", usage="قفل گروه")
+async def cmd_lock_group(ctx: CommandContext) -> None:
+    await _apply_group_lock(ctx, "all")
+
+
+@command("قفل گروه رسانه", "قفل رسانه گروه", "بستن رسانه", "قفل مدیا",
+         role="admin", permission="restrict", category="locks",
+         description="قفل ارسال رسانه در گروه (متن آزاد)", usage="قفل گروه رسانه")
+async def cmd_lock_group_media(ctx: CommandContext) -> None:
+    await _apply_group_lock(ctx, "media")
+
+
+@command("باز کردن گروه", "بازکردن گروه", "لغو قفل گروه", "آزاد کردن گروه",
+         "آنلاک گروه", "بازگشایی گروه",
+         role="admin", permission="restrict", category="locks",
+         description="برداشتن قفل کلی گروه", usage="باز کردن گروه")
+async def cmd_unlock_group(ctx: CommandContext) -> None:
+    await _apply_group_lock(ctx, "off")
+
+
+@command("وضعیت قفل گروه", "وضعیت گروه", role="member", category="locks",
+         description="نمایش وضعیت قفل کلی گروه", usage="وضعیت قفل گروه")
+async def cmd_group_lock_status(ctx: CommandContext) -> None:
+    from ..services.permissions import bot_has_right
+
+    if not await bot_has_right(ctx.bot, ctx.chat_id, "can_restrict_members"):
+        await ctx.reply("⚠️ ربات دسترسی «محدود کردن اعضا» ندارد و نمی‌تواند "
+                        "وضعیت قفل گروه را بخواند.")
+        return
+    state = await chatlock.chat_lock_state(ctx.bot, ctx.chat_id)
+    await ctx.reply(f"🔒 <b>وضعیت قفل گروه</b>\n\n{chatlock.MODE_LABELS[state]}")

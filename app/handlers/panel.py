@@ -144,6 +144,9 @@ async def _prepare_ctx(session: AsyncSession, bot: Bot, chat_id: int, user_id: i
         ctx["lock_page"] = extra.get("lock_page", "links")
     if section == "locks":
         ctx["lock_page"] = extra.get("lock_page", "links")
+        from ..services import chatlock
+
+        ctx["chat_lock"] = await chatlock.chat_lock_state(bot, chat_id)
     if section == "filters":
         rules = await filter_service.get_rules(session, chat_id)
         notes = await note_service.list_notes(session, chat_id)
@@ -661,6 +664,110 @@ async def on_warn_action(callback: CallbackQuery, session: AsyncSession, bot: Bo
     else:
         text = "ℹ️ عملیات نامشخص است."
     await safe_edit(callback.message, text)
+
+
+@router.callback_query(F.data.startswith("undo:"))
+async def on_undo(callback: CallbackQuery, session: AsyncSession, bot: Bot) -> None:
+    """Reverse the moderation action the button was attached to."""
+    from ..core.telegram_extra import call_api_raw
+    from ..keyboards.menus import RIGHT_PRESETS
+    from ..services import moderation as mod
+    from ..services import tags as tag_service
+    from ..services.chat_state import invalidate_member
+
+    parts = parse_cb(callback.data or "")
+    if len(parts) < 3:
+        await safe_answer(callback)
+        return
+    action, raw_user = parts[1], parts[2]
+    user_id = int(raw_user) if raw_user.isdigit() else 0
+    chat_id = await _panel_chat_id(callback, session)
+    actor = await permissions.build_actor(bot, chat_id, callback.from_user.id, session=session)
+    if not user_id:
+        await safe_answer(callback)
+        return
+
+    if action == "unmute":
+        if not actor.can_restrict():
+            await safe_answer(callback, "⛔️ شما اجازه «محدود کردن اعضا» را ندارید.",
+                              show_alert=True)
+            return
+        text = await mod.unmute_user(bot, session, chat_id=chat_id, actor=actor,
+                                     target_id=user_id, target_name=str(user_id),
+                                     reason="لغو از دکمه")
+    elif action == "unban":
+        if not actor.can_ban():
+            await safe_answer(callback, "⛔️ شما اجازه «بن/رفع بن» را ندارید.", show_alert=True)
+            return
+        text = await mod.unban_user(bot, session, chat_id=chat_id, actor=actor,
+                                    target_id=user_id, target_name=str(user_id),
+                                    reason="لغو از دکمه")
+    elif action == "unwarn":
+        if not (actor.can_ban() or actor.can_restrict() or actor.has_role("moderator")):
+            await safe_answer(callback, "⛔️ شما اجازه این کار را ندارید.", show_alert=True)
+            return
+        text = await mod.unwarn_user(bot, session, chat_id=chat_id, actor=actor,
+                                     target_id=user_id, target_name=str(user_id))
+    elif action == "demote":
+        if not actor.can_promote():
+            await safe_answer(callback, "⛔️ فقط مدیران گروه می‌توانند مدیر عزل کنند.",
+                              show_alert=True)
+            return
+        if not await permissions.bot_has_right(bot, chat_id, "can_promote_members"):
+            await safe_answer(callback, "⚠️ ربات دسترسی «افزودن مدیر جدید» را ندارد.",
+                              show_alert=True)
+            return
+        payload = {"chat_id": chat_id, "user_id": user_id, "can_manage_chat": True,
+                   **RIGHT_PRESETS["none"]}
+        if not await call_api_raw(bot, "promoteChatMember", payload):
+            await safe_answer(callback, "⚠️ تلگرام این تغییر را نپذیرفت.", show_alert=True)
+            return
+        invalidate_member(chat_id, user_id)
+        text = "↩️ مدیر عزل شد و همهٔ دسترسی‌های او گرفته شد."
+    elif action == "deltag":
+        if not actor.can_manage_settings():
+            await safe_answer(callback, "⛔️ فقط مدیران گروه می‌توانند تگ را حذف کنند.",
+                              show_alert=True)
+            return
+        await tag_service.set_tag(session, chat_id, user_id, None)
+        await tag_service.apply_member_tag(bot, chat_id, user_id, None)
+        text = "↩️ تگ کاربر حذف شد."
+    else:
+        await safe_answer(callback)
+        return
+
+    await safe_answer(callback)
+    if callback.message:
+        await safe_edit(callback.message, f"↩️ <b>لغو شد</b>\n\n{text}")
+
+
+@router.callback_query(F.data.startswith("cl:"))
+async def on_chat_lock(callback: CallbackQuery, session: AsyncSession, bot: Bot) -> None:
+    """قفل گروه / باز کردن گروه straight from the locks panel."""
+    from ..services import chatlock
+
+    parts = parse_cb(callback.data or "")
+    mode = parts[1] if len(parts) > 1 else ""
+    chat_id = await _panel_chat_id(callback, session)
+    actor = await permissions.build_actor(bot, chat_id, callback.from_user.id, session=session)
+    if not actor.can_restrict():
+        await safe_answer(callback, "⛔️ شما اجازه «محدود کردن اعضا» را ندارید.", show_alert=True)
+        return
+    if mode not in chatlock.MODES:
+        await safe_answer(callback)
+        return
+    if not await permissions.bot_has_right(bot, chat_id, "can_restrict_members"):
+        await safe_answer(callback, "⚠️ ربات دسترسی «محدود کردن اعضا» را ندارد.", show_alert=True)
+        return
+    if not await chatlock.apply_chat_lock(bot, chat_id, mode):
+        await safe_answer(callback, "⚠️ تلگرام این تغییر را نپذیرفت.", show_alert=True)
+        return
+    await safe_answer(callback, "✅ اعمال شد.")
+    if callback.message:
+        state = await chatlock.chat_lock_state(bot, chat_id)
+        await safe_edit(callback.message,
+                        f"{chatlock.MODE_MESSAGES[mode]}\n\n"
+                        f"وضعیت کنونی: {chatlock.MODE_LABELS[state]}")
 
 
 @router.callback_query(F.data.startswith("ap:"))

@@ -39,7 +39,8 @@ from ..services import (
 from ..services.chat_state import (get_settings, invalidate_member, invalidate_settings,
                                    set_bot_role, set_trust)
 from ..services.roles import can_manage_role
-from .common import CommandContext, display_name, guard_target, require, user_html
+from .common import (CommandContext, display_name, guard_target, require, undo_keyboard,
+                     user_html)
 from .registry import command, registry
 
 logger = logging.getLogger("armando.handlers.tools")
@@ -991,7 +992,8 @@ async def cmd_promote(ctx: CommandContext) -> None:
     invalidate_member(ctx.chat_id, target.user_id)
     await ctx.reply(f"⬆️ {user_html(target.user_id, target.full_name)} "
                     f"در تنظیمات تلگرام به مدیر گروه ارتقا یافت.\n"
-                    f"{ADMIN_MANAGE_HINT}")
+                    f"{ADMIN_MANAGE_HINT}",
+                    reply_markup=undo_keyboard("demote", target.user_id))
 
 
 @command("تنزل", "برکناری ادمین", "حذف ادمین", "عدم ادمین", "عزل ادمین",

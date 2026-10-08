@@ -713,3 +713,95 @@ async def test_azl_in_a_sentence_is_not_a_command(dispatcher, monkeypatch):
     await feed(dispatcher, bot, group_message("عزل شد", user_id=OWNER_ID, reply_to=target))
     assert not reported, reported
     assert raw_calls == []
+
+
+# --------------------------------------------------------------------------- #
+# Undo buttons and group-wide lock
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_mute_reply_carries_an_undo_button(dispatcher, monkeypatch):
+    """After «سکوت» the reply itself offers «لغو سکوت»."""
+    import app.handlers.errors as errors_module
+
+    reported = []
+    monkeypatch.setattr(errors_module, "notify_error_chat",
+                        AsyncMock(side_effect=lambda *a, **k: reported.append(a)))
+
+    bot = build_fake_bot()
+    target = group_message("سلام", user_id=MEMBER_ID)
+    await feed(dispatcher, bot, group_message("سکوت", user_id=OWNER_ID, reply_to=target))
+    assert not reported, reported
+    keyboard = bot.send_message.await_args.kwargs.get("reply_markup")
+    assert keyboard is not None, "the mute reply must carry the undo button"
+    callbacks = [btn.callback_data for row in keyboard.inline_keyboard for btn in row]
+    assert f"undo:unmute:{MEMBER_ID}" in callbacks, callbacks
+
+
+@pytest.mark.asyncio
+async def test_undo_button_unmutes_the_member(dispatcher, monkeypatch):
+    """Clicking «لغو سکوت» really lifts the restriction."""
+    bot = build_fake_bot()
+    callback = CallbackQuery(
+        id="21", from_user=User(id=OWNER_ID, is_bot=False, first_name="Ali"),
+        chat_instance="1", data=cb("undo", "unmute", MEMBER_ID),
+        message=_msg(text="سکوت"),
+    )
+    await dispatcher.feed_update(bot, Update(update_id=_next_update_id(),
+                                             callback_query=callback))
+    assert bot.restrict_chat_member.await_count >= 1
+    permissions = bot.restrict_chat_member.await_args.kwargs.get("permissions")
+    assert permissions is not None and permissions.can_send_messages is True
+
+
+@pytest.mark.asyncio
+async def test_lock_group_command_sets_chat_permissions(dispatcher, monkeypatch):
+    """«قفل گروه» locks the whole chat for ordinary members."""
+    import app.handlers.errors as errors_module
+
+    reported = []
+    monkeypatch.setattr(errors_module, "notify_error_chat",
+                        AsyncMock(side_effect=lambda *a, **k: reported.append(a)))
+
+    bot = build_fake_bot()
+    await feed(dispatcher, bot, group_message("قفل گروه", user_id=OWNER_ID))
+    assert not reported, reported
+    assert bot.set_chat_permissions.await_count == 1
+    permissions = bot.set_chat_permissions.await_args.kwargs.get("permissions")
+    assert permissions.can_send_messages is False
+    assert permissions.can_send_photos is False
+    assert permissions.can_send_videos is False
+
+
+@pytest.mark.asyncio
+async def test_unlock_group_command_restores_permissions(dispatcher, monkeypatch):
+    """«باز کردن گروه» gives the members their voice back."""
+    import app.handlers.errors as errors_module
+
+    reported = []
+    monkeypatch.setattr(errors_module, "notify_error_chat",
+                        AsyncMock(side_effect=lambda *a, **k: reported.append(a)))
+
+    bot = build_fake_bot()
+    await feed(dispatcher, bot, group_message("باز کردن گروه", user_id=OWNER_ID))
+    assert not reported, reported
+    assert bot.set_chat_permissions.await_count == 1
+    permissions = bot.set_chat_permissions.await_args.kwargs.get("permissions")
+    assert permissions.can_send_messages is True
+    assert permissions.can_send_photos is True
+
+
+@pytest.mark.asyncio
+async def test_group_lock_button_in_the_panel(dispatcher, monkeypatch):
+    """The locks panel can lock and unlock the group with one tap."""
+    bot = build_fake_bot()
+    callback = CallbackQuery(
+        id="22", from_user=User(id=OWNER_ID, is_bot=False, first_name="Ali"),
+        chat_instance="1", data=cb("cl", "media"),
+        message=_msg(text="قفل‌ها"),
+    )
+    await dispatcher.feed_update(bot, Update(update_id=_next_update_id(),
+                                             callback_query=callback))
+    assert bot.set_chat_permissions.await_count == 1
+    permissions = bot.set_chat_permissions.await_args.kwargs.get("permissions")
+    assert permissions.can_send_messages is True    # text stays allowed
+    assert permissions.can_send_photos is False     # media is blocked

@@ -12,6 +12,7 @@ from typing import Any, Callable
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from ..core.normalization import to_persian_digits
+from ..services.chatlock import MODE_LABELS
 from ..services.locks import LOCK_GROUPS, LOCK_REGISTRY
 from ..services.moderation import PUNISHMENT_OPTIONS_FA
 from ..services.roles import level_of
@@ -257,6 +258,9 @@ def _panel_locks(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
                      + (f"  (🎯 {PUNISHMENT_OPTIONS_FA.get(action, action)})" if enabled else ""))
     lines.append("")
     lines.append("برای تغییر، روی نام قفل بزنید؛ سپس نوع برخورد را انتخاب کنید.")
+    lines.append("")
+    lines.append("🔒 <b>قفل کلی گروه</b> (دسترسی ارسال اعضا در تلگرام)")
+    lines.append(f"وضعیت: {MODE_LABELS.get(ctx.get('chat_lock') or 'off', '—')}")
 
     buttons = []
     for key in keys:
@@ -267,6 +271,9 @@ def _panel_locks(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
                              cb("lock", "toggle", key, page)))
     rows = grid(buttons, per_row=2)
 
+    rows.append([danger("🔒 قفل گروه", cb("cl", "all")),
+                 primary("🖼 قفل رسانه", cb("cl", "media")),
+                 success("🔓 باز کردن گروه", cb("cl", "off"))])
     group_buttons = [primary(LOCK_GROUPS[g], cb("lockpage", g)) for g in LOCK_GROUPS]
     rows.append(group_buttons)
     rows.append([danger("🧹 غیرفعال‌سازی همه قفل‌ها", cb("conf", "clearlocks", "all"))])
@@ -1003,6 +1010,8 @@ def help_text(topic: str) -> str:
             "• <code>قفل لینک</code> / <code>بازکردن لینک</code>",
             "• <code>قفل عکس</code> / <code>قفل ویدیو</code> / <code>قفل استیکر</code> / <code>قفل فوروارد</code>",
             "• <code>قفل فحاشی</code> / <code>قفل پورن</code> / <code>قفل انگلیسی</code>",
+            "• <code>قفل گروه</code> / <code>قفل گروه رسانه</code> / <code>باز کردن گروه</code>",
+            "• <code>وضعیت قفل گروه</code>",
             "• برای مشاهده همه قفل‌ها: <code>لیست قفل‌ها</code> یا پنل «🔒 قفل‌ها»",
         ]),
         "filters": "\n".join([
