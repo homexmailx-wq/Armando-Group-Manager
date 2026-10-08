@@ -33,6 +33,7 @@ MEMBER_ID = 2000
 ADMIN_ID = 3000
 BOT_ID = 999999
 PROMOTED_ADMIN_ID = 4000  # an administrator the bot itself promoted (editable)
+OUTSIDER_ID = 123456789   # a realistic numeric Telegram id (5+ digits)
 
 
 # --------------------------------------------------------------------------- #
@@ -100,7 +101,16 @@ def build_fake_bot(**bot_rights) -> AsyncMock:
     bot.get_chat_member = AsyncMock(side_effect=get_chat_member)
     bot.get_me = AsyncMock(return_value=User(id=BOT_ID, is_bot=True,
                                              first_name="Armando", username="armando_bot"))
-    bot.get_chat = AsyncMock(return_value=Chat(id=CHAT_ID, type="supergroup", title="گروه تست"))
+    known_usernames = {"parhannni": MEMBER_ID, "ali": MEMBER_ID, "admin": ADMIN_ID}
+
+    async def get_chat(chat_id):
+        if isinstance(chat_id, str) and chat_id.startswith("@"):
+            user_id = known_usernames.get(chat_id[1:].lower())
+            if user_id is not None:
+                return Chat(id=user_id, type="private", first_name="User")
+        return Chat(id=CHAT_ID, type="supergroup", title="گروه تست")
+
+    bot.get_chat = AsyncMock(side_effect=get_chat)
     bot.get_chat_administrators = AsyncMock(return_value=[])
     bot.send_message = AsyncMock(return_value=_msg())
     bot.send_document = AsyncMock(return_value=_msg())
@@ -805,3 +815,186 @@ async def test_group_lock_button_in_the_panel(dispatcher, monkeypatch):
     permissions = bot.set_chat_permissions.await_args.kwargs.get("permissions")
     assert permissions.can_send_messages is True    # text stays allowed
     assert permissions.can_send_photos is False     # media is blocked
+
+
+# --------------------------------------------------------------------------- #
+# Commands that take @username / numeric id instead of a reply
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_unmute_by_username_without_reply(dispatcher, monkeypatch):
+    """«لغو سکوت @Parhannni» must work exactly like a reply."""
+    import app.handlers.errors as errors_module
+
+    reported = []
+    monkeypatch.setattr(errors_module, "notify_error_chat",
+                        AsyncMock(side_effect=lambda *a, **k: reported.append(a)))
+
+    bot = build_fake_bot()
+    await feed(dispatcher, bot, group_message("لغو سکوت @Parhannni", user_id=OWNER_ID))
+    assert not reported, reported
+    assert bot.restrict_chat_member.await_count >= 1
+    assert bot.restrict_chat_member.await_args.kwargs.get("user_id") == MEMBER_ID
+
+
+@pytest.mark.asyncio
+async def test_unmute_by_numeric_id(dispatcher, monkeypatch):
+    """A numeric id works as the target as well."""
+    import app.handlers.errors as errors_module
+
+    reported = []
+    monkeypatch.setattr(errors_module, "notify_error_chat",
+                        AsyncMock(side_effect=lambda *a, **k: reported.append(a)))
+
+    bot = build_fake_bot()
+    await feed(dispatcher, bot, group_message(f"لغو سکوت {OUTSIDER_ID}", user_id=OWNER_ID))
+    assert not reported, reported
+    assert bot.restrict_chat_member.await_count >= 1
+    assert bot.restrict_chat_member.await_args.kwargs.get("user_id") == OUTSIDER_ID
+
+
+@pytest.mark.asyncio
+async def test_a_sentence_is_still_not_a_command(dispatcher, monkeypatch):
+    """«لغو سکوت الان انجام بده» is ordinary talk, not a moderation command."""
+    bot = build_fake_bot()
+    await feed(dispatcher, bot, group_message("لغو سکوت الان انجام بده لطفا",
+                                              user_id=OWNER_ID))
+    assert bot.restrict_chat_member.await_count == 0
+
+
+# --------------------------------------------------------------------------- #
+# «قفل خروج» - automatic ban on leave
+# --------------------------------------------------------------------------- #
+def _leave_message(user_id: int) -> Message:
+    return Message(
+        message_id=_next_update_id(),
+        date=int(time.time()),
+        chat=Chat(id=CHAT_ID, type="supergroup", title="گروه تست"),
+        from_user=User(id=user_id, is_bot=False, first_name="Leaver"),
+        left_chat_member=User(id=user_id, is_bot=False, first_name="Leaver"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_ban_on_leave_bans_and_offers_undo(dispatcher, monkeypatch):
+    """After «قفل خروج» a member who leaves is banned, with an undo button."""
+    import app.handlers.errors as errors_module
+
+    reported = []
+    monkeypatch.setattr(errors_module, "notify_error_chat",
+                        AsyncMock(side_effect=lambda *a, **k: reported.append(a)))
+
+    bot = build_fake_bot()
+    await feed(dispatcher, bot, group_message("قفل خروج روشن", user_id=OWNER_ID))
+    await feed(dispatcher, bot, _leave_message(MEMBER_ID))
+    assert not reported, reported
+    assert bot.ban_chat_member.await_count >= 1
+    assert bot.ban_chat_member.await_args.kwargs.get("user_id") == MEMBER_ID
+    texts = [call.kwargs.get("text", "") for call in bot.send_message.await_args_list]
+    assert any("قفل خروج" in text for text in texts), texts
+    keyboard = bot.send_message.await_args.kwargs.get("reply_markup")
+    callbacks = [btn.callback_data for row in keyboard.inline_keyboard for btn in row]
+    assert f"undo:unban:{MEMBER_ID}" in callbacks, callbacks
+    assert any(data.startswith("lg:off:") for data in callbacks), callbacks
+
+
+@pytest.mark.asyncio
+async def test_leave_is_ignored_when_the_rule_is_off(dispatcher, monkeypatch):
+    """Default configuration: nobody is banned for leaving."""
+    import app.handlers.errors as errors_module
+
+    reported = []
+    monkeypatch.setattr(errors_module, "notify_error_chat",
+                        AsyncMock(side_effect=lambda *a, **k: reported.append(a)))
+
+    bot = build_fake_bot()
+    await feed(dispatcher, bot, _leave_message(MEMBER_ID))
+    assert not reported, reported
+    assert bot.ban_chat_member.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_quick_leave_rule_bans_a_join_and_run(dispatcher, monkeypatch):
+    """«بن خروج سریع ۱۰» catches someone who joins and leaves at once."""
+    import app.handlers.errors as errors_module
+
+    reported = []
+    monkeypatch.setattr(errors_module, "notify_error_chat",
+                        AsyncMock(side_effect=lambda *a, **k: reported.append(a)))
+
+    bot = build_fake_bot()
+    await feed(dispatcher, bot, group_message("بن خروج سریع ۱۰", user_id=OWNER_ID))
+    joiner = User(id=MEMBER_ID, is_bot=False, first_name="Leaver")
+    await feed(dispatcher, bot, Message(
+        message_id=_next_update_id(), date=int(time.time()),
+        chat=Chat(id=CHAT_ID, type="supergroup", title="گروه تست"),
+        from_user=joiner, new_chat_members=[joiner]))
+    await feed(dispatcher, bot, _leave_message(MEMBER_ID))
+    assert not reported, reported
+    assert bot.ban_chat_member.await_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_leave_guard_can_be_switched_off_from_the_button(dispatcher, monkeypatch):
+    """The «خاموش کردن این قانون» button really disables the rule."""
+    bot = build_fake_bot()
+    callback = CallbackQuery(
+        id="31", from_user=User(id=OWNER_ID, is_bot=False, first_name="Ali"),
+        chat_instance="1", data=cb("lg", "off", "ban_on_leave"),
+        message=_msg(text="قفل خروج"),
+    )
+    await dispatcher.feed_update(bot, Update(update_id=_next_update_id(),
+                                             callback_query=callback))
+    assert _edit_count(bot) >= 1
+    await feed(dispatcher, bot, _leave_message(MEMBER_ID))
+    assert bot.ban_chat_member.await_count == 0
+
+
+# --------------------------------------------------------------------------- #
+# An open panel belongs to the admin who opened it
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_other_admins_cannot_click_an_open_panel(dispatcher, monkeypatch):
+    """A panel is exclusive: another admin tapping it gets a refusal."""
+    import app.handlers.errors as errors_module
+
+    reported = []
+    monkeypatch.setattr(errors_module, "notify_error_chat",
+                        AsyncMock(side_effect=lambda *a, **k: reported.append(a)))
+
+    bot = build_fake_bot()
+    await feed(dispatcher, bot, group_message("پنل", user_id=ADMIN_ID))
+    callback = CallbackQuery(
+        id="41", from_user=User(id=OWNER_ID, is_bot=False, first_name="Owner"),
+        chat_instance="1", data=cb("nav", "home"),
+        message=_msg(text="پنل"),
+    )
+    await dispatcher.feed_update(bot, Update(update_id=_next_update_id(),
+                                             callback_query=callback))
+    assert not reported, reported
+    assert bot.answer_callback_query.await_count >= 1
+    alert = bot.answer_callback_query.await_args.kwargs
+    assert alert.get("show_alert") is True
+    assert "پنل" in (alert.get("text") or "")
+    assert _edit_count(bot) == 0, "a foreign click must not change the panel"
+
+
+@pytest.mark.asyncio
+async def test_the_owner_may_still_use_their_own_panel(dispatcher, monkeypatch):
+    """The admin who opened the panel can navigate it normally."""
+    import app.handlers.errors as errors_module
+
+    reported = []
+    monkeypatch.setattr(errors_module, "notify_error_chat",
+                        AsyncMock(side_effect=lambda *a, **k: reported.append(a)))
+
+    bot = build_fake_bot()
+    await feed(dispatcher, bot, group_message("پنل", user_id=OWNER_ID))
+    callback = CallbackQuery(
+        id="42", from_user=User(id=OWNER_ID, is_bot=False, first_name="Owner"),
+        chat_instance="1", data=cb("panel", "locks"),
+        message=_msg(text="پنل"),
+    )
+    await dispatcher.feed_update(bot, Update(update_id=_next_update_id(),
+                                             callback_query=callback))
+    assert not reported, reported
+    assert _edit_count(bot) >= 1, "the owner's own clicks must work"

@@ -12,9 +12,11 @@ from ..core.errors import safe_delete, safe_restrict, safe_send
 from ..core.normalization import to_persian_digits
 from ..db.models import Chat
 from ..services import antiraid, captcha, connection as connection_service
+from ..services import leave_guard
 from ..services import moderation as mod
 from ..services import welcome as welcome_service
-from ..services.chat_state import get_or_create_chat, get_or_create_user, get_settings
+from ..services.chat_state import (get_or_create_chat, get_or_create_user, get_settings,
+                                   get_settings_cached)
 from ..services.moderation import MUTE_PERMISSIONS
 
 router = Router(name="members")
@@ -38,6 +40,39 @@ async def _raid_check(message: Message, session: AsyncSession, bot: Bot, joined)
                 f"{to_persian_digits(str(settings_obj.antiraid_threshold))} کاربر وارد گروه شدند.\n"
                 "حالت محافظت به‌طور خودکار فعال شد.",
                 parse_mode="HTML")
+
+
+async def _joined_at(session: AsyncSession, chat_id: int, user_id: int):
+    """When did this member join? (needed by the quick-leave rule)."""
+    from ..db.models import ChatMemberState
+    from ..services.chat_state import get_member_state
+
+    state = await get_member_state(session, chat_id, user_id, create=False)
+    return getattr(state, "joined_at", None) if state is not None else None
+
+
+async def _leave_guard(bot: Bot, session: AsyncSession, chat_id: int, user,
+                       settings: dict, joined_at) -> None:
+    """Ban members who leave, and explain it with one-tap undo buttons."""
+    if not leave_guard.is_enabled(settings):
+        return
+    reason = await leave_guard.check_leave(bot, chat_id, user.id, settings, joined_at)
+    if reason is None:
+        return
+    from ..keyboards.factory import cb, markup, primary, row, success
+
+    rule = "ban_on_leave" if settings.get("ban_on_leave") else "quick_leave_ban"
+    name = (user.full_name or "").strip() or str(user.id)
+    text = ("🚪 <b>قفل خروج</b>\n\n"
+            f"<a href=\"tg://user?id={user.id}\">{name}</a> گروه را ترک کرد و "
+            f"طبق تنظیمات بن شد.\n"
+            f"📌 دلیل: {reason}")
+    keyboard = markup([
+        [success("↩️ رفع بن", cb("undo", "unban", user.id)),
+         primary("⛔️ خاموش کردن این قانون", cb("lg", "off", rule))],
+        row(primary("🏠 پنل", cb("nav", "home"))),
+    ])
+    await safe_send(bot, chat_id, text, parse_mode="HTML", reply_markup=keyboard)
 
 
 @router.message(F.new_chat_members)
@@ -105,14 +140,16 @@ async def on_left_member(message: Message, session: AsyncSession, bot: Bot) -> N
             chat.is_active = False
         await connection_service.drop_chat(session, message.chat.id)
         return
+    chat_settings = await get_settings_cached(session, message.chat.id)
+    joined_at = await _joined_at(session, message.chat.id, user.id)
     await welcome_service.record_leave(session, message.chat.id, user.id)
     if settings_obj.clean_leave:
         await safe_delete(bot, message.chat.id, message.message_id, context="clean_leave")
     if settings_obj.goodbye_enabled:
         await welcome_service.send_goodbye(bot, session, chat_id=message.chat.id, user=user,
                                            chat_title=message.chat.title or "")
-    if settings_obj.clean_leave and settings_obj.goodbye_enabled:
-        pass
+    await _leave_guard(bot, session, chat_id=message.chat.id, user=user,
+                       settings=chat_settings, joined_at=joined_at)
 
 
 @router.message(F.pinned_message | F.new_chat_title | F.new_chat_photo |
