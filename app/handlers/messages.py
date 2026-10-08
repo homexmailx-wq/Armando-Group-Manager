@@ -81,7 +81,10 @@ async def on_group_message(message: Message, session: AsyncSession, bot: Bot) ->
     chat = message.chat
     if user is None:
         return
-    if user.is_bot:
+    # Messages posted **as a channel** carry ``sender_chat``; they must reach
+    # the lock engine (ordinary bot messages are still ignored).
+    sender_chat = getattr(message, "sender_chat", None)
+    if user.is_bot and sender_chat is None:
         return
 
     await get_or_create_chat(session, chat)
@@ -95,6 +98,11 @@ async def on_group_message(message: Message, session: AsyncSession, bot: Bot) ->
     await record_message(session, chat.id, user.id, media=is_media)
 
     actor = await permissions.build_actor(bot, chat.id, user.id, session=session)
+    if sender_chat is not None:
+        # A channel post is never an administrator action: treat the sender as
+        # an ordinary member so the lock engine may act on it.
+        actor = permissions.Actor(user_id=user.id, chat_id=chat.id, telegram_status="member",
+                                  rights_known=False)
 
     # ------------------------------------------------------------------ AFK
     if settings.get("afk_enabled", True):
@@ -163,6 +171,8 @@ async def on_group_message(message: Message, session: AsyncSession, bot: Bot) ->
             if "حذف" not in result:
                 logger.debug("lock action result: %s", result)
             return
+        if sender_chat is not None:
+            return  # nothing else applies to a channel post
 
     # ------------------------------------------------------------- blocklist
     if not actor.bypasses("filters"):

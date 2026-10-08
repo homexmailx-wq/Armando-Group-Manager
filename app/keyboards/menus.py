@@ -313,11 +313,21 @@ def _panel_lock_detail(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
     if spec and spec.threshold:
         value = int((state.extra or {}).get(spec.threshold_field or "", spec.default_threshold)) if state else spec.default_threshold
         lines.append(f"حد مجاز: {to_persian_digits(str(value))}")
-    keyboard = markup([
+    rows = [
         [onoff(f"{'🟢 فعال' if enabled else '🔴 خاموش'}", enabled, cb("lock", "toggle", key, ctx.get('lock_page') or 'links'))],
         *action_selector("lock", f"action:{key}", action, options=PUNISHMENT_OPTIONS_FA, prefix="lockact"),
-        row(home()),
-    ])
+    ]
+    if spec and spec.threshold:
+        field = spec.threshold_field or "value"
+        value = int((state.extra or {}).get(field, spec.default_threshold)) if state else spec.default_threshold
+        step = 500 if value >= 1000 else (5 if value <= 50 else 50)
+        rows.append([
+            primary("➖", cb("locknum", key, field, -step, ctx.get("lock_page") or "links")),
+            btn(f"حد مجاز: {to_persian_digits(str(value))}", cb("noop")),
+            success("➕", cb("locknum", key, field, step, ctx.get("lock_page") or "links")),
+        ])
+    rows.append(row(home()))
+    keyboard = markup(rows)
     return "\n".join(lines), keyboard
 
 
@@ -1027,6 +1037,9 @@ def help_text(topic: str) -> str:
             "• <code>قفل لینک</code> / <code>بازکردن لینک</code>",
             "• <code>قفل عکس</code> / <code>قفل ویدیو</code> / <code>قفل استیکر</code> / <code>قفل فوروارد</code>",
             "• <code>قفل فحاشی</code> / <code>قفل پورن</code> / <code>قفل انگلیسی</code>",
+            "• <code>قفل چینی</code> / <code>قفل روسی</code> / <code>قفل هندی</code>",
+            "• <code>قفل طولانی</code> (پیامِ بیش از ۱۰۰۰ کاراکتر → حذف + سکوت)",
+            "• <code>قفل کانال</code> (ارسال ناشناس با کانال → حذف + مسدود کردن کانال)",
             "• <code>قفل گروه</code> / <code>قفل گروه رسانه</code> / <code>باز کردن گروه</code>",
             "• <code>قفل خروج</code> (بن خودکار هرکس خارج شود)",
             "• <code>بن خروج سریع ۱۰</code> (بنِ خروجِ بلافاصله پس از ورود)",

@@ -998,3 +998,181 @@ async def test_the_owner_may_still_use_their_own_panel(dispatcher, monkeypatch):
                                              callback_query=callback))
     assert not reported, reported
     assert _edit_count(bot) >= 1, "the owner's own clicks must work"
+
+
+# --------------------------------------------------------------------------- #
+# Language locks, long-message lock and anonymous (channel) senders
+# --------------------------------------------------------------------------- #
+async def _enable_lock(dispatcher, bot, phrase: str) -> None:
+    await feed(dispatcher, bot, group_message(phrase, user_id=OWNER_ID))
+
+
+@pytest.mark.asyncio
+async def test_chinese_lock_mutes_the_member(dispatcher, monkeypatch):
+    """With «قفل چینی» a Chinese message mutes its author."""
+    import app.handlers.errors as errors_module
+
+    reported = []
+    monkeypatch.setattr(errors_module, "notify_error_chat",
+                        AsyncMock(side_effect=lambda *a, **k: reported.append(a)))
+
+    bot = build_fake_bot()
+    await _enable_lock(dispatcher, bot, "قفل چینی")
+    await feed(dispatcher, bot, group_message("你好朋友 这是中文", user_id=MEMBER_ID))
+    assert not reported, reported
+    assert bot.restrict_chat_member.await_count >= 1
+    assert bot.delete_message.await_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_russian_lock_mutes_cyrillic_text(dispatcher, monkeypatch):
+    """«قفل روسی» catches Cyrillic writing."""
+    import app.handlers.errors as errors_module
+
+    reported = []
+    monkeypatch.setattr(errors_module, "notify_error_chat",
+                        AsyncMock(side_effect=lambda *a, **k: reported.append(a)))
+
+    bot = build_fake_bot()
+    await _enable_lock(dispatcher, bot, "قفل روسی")
+    await feed(dispatcher, bot, group_message("Привет как дела", user_id=MEMBER_ID))
+    assert not reported, reported
+    assert bot.restrict_chat_member.await_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_hindi_lock_mutes_devanagari_text(dispatcher, monkeypatch):
+    """«قفل هندی» catches Devanagari writing."""
+    import app.handlers.errors as errors_module
+
+    reported = []
+    monkeypatch.setattr(errors_module, "notify_error_chat",
+                        AsyncMock(side_effect=lambda *a, **k: reported.append(a)))
+
+    bot = build_fake_bot()
+    await _enable_lock(dispatcher, bot, "قفل هندی")
+    await feed(dispatcher, bot, group_message("नमस्ते दोस्तों", user_id=MEMBER_ID))
+    assert not reported, reported
+    assert bot.restrict_chat_member.await_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_persian_text_is_never_touched_by_the_language_locks(dispatcher, monkeypatch):
+    """Ordinary Persian talk must stay untouched even with the locks on."""
+    import app.handlers.errors as errors_module
+
+    reported = []
+    monkeypatch.setattr(errors_module, "notify_error_chat",
+                        AsyncMock(side_effect=lambda *a, **k: reported.append(a)))
+
+    bot = build_fake_bot()
+    for phrase in ("قفل چینی", "قفل روسی", "قفل هندی"):
+        await _enable_lock(dispatcher, bot, phrase)
+    await feed(dispatcher, bot, group_message("سلام چه خبر", user_id=MEMBER_ID))
+    assert not reported, reported
+    assert bot.restrict_chat_member.await_count == 0
+    assert bot.delete_message.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_long_message_lock_mutes_over_the_limit(dispatcher, monkeypatch):
+    """A message longer than the limit (1000 by default) mutes the member."""
+    import app.handlers.errors as errors_module
+
+    reported = []
+    monkeypatch.setattr(errors_module, "notify_error_chat",
+                        AsyncMock(side_effect=lambda *a, **k: reported.append(a)))
+
+    bot = build_fake_bot()
+    await _enable_lock(dispatcher, bot, "قفل طولانی")
+    await feed(dispatcher, bot, group_message("ا" * 1001, user_id=MEMBER_ID))
+    assert not reported, reported
+    assert bot.restrict_chat_member.await_count >= 1
+
+    short_bot = build_fake_bot()
+    await _enable_lock(dispatcher, short_bot, "قفل طولانی")
+    await feed(dispatcher, short_bot, group_message("ا" * 1000, user_id=MEMBER_ID))
+    assert short_bot.restrict_chat_member.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_anonymous_channel_post_is_blocked(dispatcher, monkeypatch):
+    """A message posted as a channel gets the channel banned, not ignored."""
+    import app.handlers.errors as errors_module
+
+    reported = []
+    monkeypatch.setattr(errors_module, "notify_error_chat",
+                        AsyncMock(side_effect=lambda *a, **k: reported.append(a)))
+
+    bot = build_fake_bot()
+    await _enable_lock(dispatcher, bot, "قفل کانال")
+    channel = Chat(id=-1007777777, type="channel", title="My Channel")
+    message = Message(
+        message_id=_next_update_id(), date=int(time.time()),
+        chat=Chat(id=CHAT_ID, type="supergroup", title="گروه تست"),
+        from_user=User(id=1087968824, is_bot=True, first_name="Group"),
+        sender_chat=channel, text="تبلیغ از طرف کانال")
+    await feed(dispatcher, bot, message)
+    assert not reported, reported
+    assert bot.ban_chat_sender_chat.await_count >= 1
+    assert bot.ban_chat_sender_chat.await_args.kwargs.get("sender_chat_id") == -1007777777
+    assert bot.delete_message.await_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_hidden_admin_posts_are_left_alone(dispatcher, monkeypatch):
+    """A hidden group admin is a real admin: the lock must not touch them."""
+    import app.handlers.errors as errors_module
+
+    reported = []
+    monkeypatch.setattr(errors_module, "notify_error_chat",
+                        AsyncMock(side_effect=lambda *a, **k: reported.append(a)))
+
+    bot = build_fake_bot()
+    await _enable_lock(dispatcher, bot, "قفل ناشناس")
+    await feed(dispatcher, bot, group_message("پیام پنهان", user_id=1087968824))
+    assert not reported, reported
+    assert bot.delete_message.await_count == 0
+    assert bot.restrict_chat_member.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_locks_are_off_by_default(dispatcher, monkeypatch):
+    """Nothing is muted until an admin turns a lock on."""
+    import app.handlers.errors as errors_module
+
+    reported = []
+    monkeypatch.setattr(errors_module, "notify_error_chat",
+                        AsyncMock(side_effect=lambda *a, **k: reported.append(a)))
+
+    bot = build_fake_bot()
+    await feed(dispatcher, bot, group_message("你好朋友", user_id=MEMBER_ID))
+    await feed(dispatcher, bot, group_message("الف" * 1500, user_id=MEMBER_ID))
+    assert not reported, reported
+    assert bot.restrict_chat_member.await_count == 0
+    assert bot.delete_message.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_long_lock_threshold_is_adjustable(dispatcher, session):
+    """The character limit is not hardcoded: it can be raised from the panel."""
+    bot = build_fake_bot()
+    await _enable_lock(dispatcher, bot, "قفل طولانی")
+    callback = CallbackQuery(
+        id="55", from_user=User(id=OWNER_ID, is_bot=False, first_name="Ali"),
+        chat_instance="1", data=cb("locknum", "long", "max_length", 500, "text"),
+        message=_msg(text="قفل پیام طولانی"),
+    )
+    await dispatcher.feed_update(bot, Update(update_id=_next_update_id(),
+                                             callback_query=callback))
+
+    from app.services import locks as lock_service
+
+    locks = await lock_service.get_locks_map(session, CHAT_ID)
+    assert int(locks["long"].extra.get("max_length", 1000)) == 1500
+
+    # 1200 characters is under the new limit, 1600 is above it.
+    ok_bot = build_fake_bot()
+    await _enable_lock(dispatcher, ok_bot, "قفل طولانی")
+    await feed(dispatcher, ok_bot, group_message("ا" * 1200, user_id=MEMBER_ID))
+    assert ok_bot.restrict_chat_member.await_count == 0

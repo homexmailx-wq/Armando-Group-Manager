@@ -684,6 +684,41 @@ async def on_warn_action(callback: CallbackQuery, session: AsyncSession, bot: Bo
     await safe_edit(callback.message, text)
 
 
+@router.callback_query(F.data.startswith("locknum:"))
+async def on_lock_number(callback: CallbackQuery, session: AsyncSession, bot: Bot) -> None:
+    """Change the threshold of a lock (e.g. the 1000 character limit)."""
+    parts = parse_cb(callback.data or "")
+    # locknum:<key>:<field>:<delta>[:<page>]
+    if len(parts) < 4:
+        await safe_answer(callback)
+        return
+    key, field, raw_delta = parts[1], parts[2], parts[3]
+    page = parts[4] if len(parts) > 4 else "links"
+    try:
+        delta = int(raw_delta)
+    except ValueError:
+        await safe_answer(callback)
+        return
+    chat_id = await _panel_chat_id(callback, session)
+    if not await _ensure_admin(callback, bot, chat_id, session):
+        return
+    spec = lock_service.LOCK_REGISTRY.get(key)
+    if spec is None or not spec.threshold:
+        await safe_answer(callback)
+        return
+    locks = await lock_service.get_locks_map(session, chat_id)
+    state = locks.get(key)
+    current = int((state.extra or {}).get(field, spec.default_threshold)) if state \
+        else spec.default_threshold
+    value = max(1, min(100000, current + delta))
+    await lock_service.set_lock(session, chat_id, key,
+                                bool(state.enabled) if state else True,
+                                action=(state.action if state else None),
+                                extra={field: value}, updated_by=callback.from_user.id)
+    await safe_answer(callback, f"✅ {to_persian_digits(str(value))}")
+    await _refresh(callback, session, bot, chat_id, "lock", lock_key=key, lock_page=page)
+
+
 @router.callback_query(F.data.startswith("lg:"))
 async def on_leave_guard(callback: CallbackQuery, session: AsyncSession, bot: Bot) -> None:
     """Disable a «قفل خروج» rule straight from the ban notice."""
