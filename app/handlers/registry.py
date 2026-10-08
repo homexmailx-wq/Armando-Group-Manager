@@ -260,6 +260,8 @@ ARG_RULES: dict[str, tuple[str, str]] = {
     "ضدفلاود": ("numeric", ""),
     "ضد رید": ("numeric", ""),
     # ---- commands that act on a member: reply OR @username OR numeric id
+    "بن سراسری": ("free", ""),
+    "رفع بن سراسری": ("target", ""),
     "رفع بن": ("target", ""),
     "کیک": ("target", ""),
     "لغو سکوت": ("target", ""),

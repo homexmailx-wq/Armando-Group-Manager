@@ -8,6 +8,7 @@ is a mock.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -18,9 +19,13 @@ from aiogram.types import (
     CallbackQuery,
     Chat,
     ChatMemberAdministrator,
+    ChatMemberLeft,
     ChatMemberMember,
     ChatMemberOwner,
+    ChatMemberUpdated,
     Message,
+    MessageReactionUpdated,
+    ReactionTypeEmoji,
     Update,
     User,
 )
@@ -1189,10 +1194,6 @@ def _mention_bodies(bot) -> list[str]:
 @pytest.mark.asyncio
 async def test_mention_all_mentions_every_known_member(dispatcher, monkeypatch):
     """«تگ همه» mentions the members the bot has seen in this group."""
-    from app.services import mention_all as mention_service
-
-    mention_service._last_call.clear()
-
     bot = build_fake_bot()
     await feed(dispatcher, bot, group_message("سلام", user_id=MEMBER_ID))
     await feed(dispatcher, bot, group_message("من هم هستم", user_id=PROMOTED_ADMIN_ID))
@@ -1209,10 +1210,6 @@ async def test_mention_all_mentions_every_known_member(dispatcher, monkeypatch):
 @pytest.mark.asyncio
 async def test_mention_all_includes_the_caller_in_a_fresh_group(dispatcher):
     """A group where nobody has written yet still mentions the caller."""
-    from app.services import mention_all as mention_service
-
-    mention_service._last_call.clear()
-
     bot = build_fake_bot()
     await feed(dispatcher, bot, group_message("تگ همه", user_id=OWNER_ID))
     bodies = _mention_bodies(bot)
@@ -1222,10 +1219,6 @@ async def test_mention_all_includes_the_caller_in_a_fresh_group(dispatcher):
 @pytest.mark.asyncio
 async def test_mention_all_is_admin_only(dispatcher):
     """Ordinary members must not be able to ping everybody."""
-    from app.services import mention_all as mention_service
-
-    mention_service._last_call.clear()
-
     bot = build_fake_bot()
     await feed(dispatcher, bot, group_message("سلام", user_id=MEMBER_ID))
     await feed(dispatcher, bot, group_message("تگ همه", user_id=MEMBER_ID))
@@ -1235,20 +1228,16 @@ async def test_mention_all_is_admin_only(dispatcher):
 
 
 @pytest.mark.asyncio
-async def test_mention_all_has_a_cooldown(dispatcher):
-    """Calling it twice in a row is throttled."""
-    from app.services import mention_all as mention_service
-
-    mention_service._last_call.clear()
-
+async def test_mention_all_can_be_repeated_without_a_cooldown(dispatcher):
+    """There is no throttle: admins may call it again immediately."""
     bot = build_fake_bot()
     await feed(dispatcher, bot, group_message("سلام", user_id=MEMBER_ID))
     await feed(dispatcher, bot, group_message("تگ همه", user_id=OWNER_ID))
     await feed(dispatcher, bot, group_message("تگ همه", user_id=OWNER_ID))
 
-    assert len(_mention_bodies(bot)) == 1
+    assert len(_mention_bodies(bot)) == 2
     texts = [call.kwargs.get("text", "") for call in bot.send_message.await_args_list]
-    assert any("⏳" in text for text in texts), texts
+    assert not any("⏳" in text for text in texts), texts
 
 
 def test_mention_all_splits_into_telegram_sized_messages():
@@ -1262,3 +1251,254 @@ def test_mention_all_splits_into_telegram_sized_messages():
         assert len(message) <= 4096
     mentioned = sum(message.count("tg://user?id=") for message in messages)
     assert mentioned == len(members)
+
+
+# --------------------------------------------------------------------------- #
+# Global ban (GBan) - owner level, applied in every guarded chat
+# --------------------------------------------------------------------------- #
+async def _gban(dispatcher, bot, user_id: int) -> None:
+    """Run «بن سراسری» as the bot owner, with a reply on the target."""
+    target = group_message("پیام خاطی", user_id=user_id)
+    await feed(dispatcher, bot, group_message("بن سراسری", user_id=OWNER_ID,
+                                              reply_to=target))
+    await asyncio.sleep(0.05)   # let the background rollout finish
+
+
+@pytest.mark.asyncio
+async def test_global_ban_bans_the_target_without_crashing(dispatcher, monkeypatch):
+    """The owner command must resolve the reason and ban in the current chat."""
+    from app.config import settings as app_settings
+
+    monkeypatch.setattr(app_settings, "global_ban_enabled", True)
+
+    bot = build_fake_bot()
+    await _gban(dispatcher, bot, MEMBER_ID)
+    assert bot.ban_chat_member.await_count >= 1
+    assert bot.ban_chat_member.await_args.kwargs.get("user_id") == MEMBER_ID
+    texts = [call.kwargs.get("text", "") for call in bot.send_message.await_args_list]
+    assert not any("Error" in text for text in texts), texts
+
+
+@pytest.mark.asyncio
+async def test_global_ban_accepts_a_numeric_id(dispatcher, monkeypatch):
+    """«بن سراسری 123456789 دلیل» works without a reply."""
+    from app.config import settings as app_settings
+
+    monkeypatch.setattr(app_settings, "global_ban_enabled", True)
+
+    bot = build_fake_bot()
+    await feed(dispatcher, bot,
+               group_message(f"بن سراسری {OUTSIDER_ID} تبلیغ", user_id=OWNER_ID))
+    await asyncio.sleep(0.05)
+    assert bot.ban_chat_member.await_count >= 1
+    assert bot.ban_chat_member.await_args.kwargs.get("user_id") == OUTSIDER_ID
+    texts = [call.kwargs.get("text", "") for call in bot.send_message.await_args_list]
+    assert any("تبلیغ" in text for text in texts), texts
+
+
+@pytest.mark.asyncio
+async def test_global_ban_is_enforced_when_the_user_joins(dispatcher, monkeypatch):
+    """A banned user is removed as soon as they join a guarded chat."""
+    from app.config import settings as app_settings
+
+    monkeypatch.setattr(app_settings, "global_ban_enabled", True)
+
+    bot = build_fake_bot()
+    await _gban(dispatcher, bot, MEMBER_ID)
+
+    join_bot = bot
+    join_bot.ban_chat_member.reset_mock()
+    await dispatcher.feed_update(join_bot, Update(
+        update_id=_next_update_id(), chat_member=ChatMemberUpdated(
+            chat=Chat(id=CHAT_ID, type="supergroup", title="گروه تست"),
+            from_user=User(id=OWNER_ID, is_bot=False, first_name="Owner"),
+            date=int(time.time()),
+            old_chat_member=ChatMemberLeft(
+                user=User(id=MEMBER_ID, is_bot=False, first_name="Ali"), status="left"),
+            new_chat_member=ChatMemberMember(
+                user=User(id=MEMBER_ID, is_bot=False, first_name="Ali"), status="member"))))
+    assert join_bot.ban_chat_member.await_count >= 1
+    assert join_bot.ban_chat_member.await_args.kwargs.get("user_id") == MEMBER_ID
+
+
+@pytest.mark.asyncio
+async def test_global_ban_is_enforced_in_a_channel(dispatcher, monkeypatch):
+    """Channels are covered too (Telegram sends member updates to admins)."""
+    from app.config import settings as app_settings
+
+    monkeypatch.setattr(app_settings, "global_ban_enabled", True)
+
+    bot = build_fake_bot()
+    await _gban(dispatcher, bot, MEMBER_ID)
+    bot.ban_chat_member.reset_mock()
+
+    channel_id = -1005555555
+    await dispatcher.feed_update(bot, Update(
+        update_id=_next_update_id(), chat_member=ChatMemberUpdated(
+            chat=Chat(id=channel_id, type="channel", title="کانال تست"),
+            from_user=User(id=OWNER_ID, is_bot=False, first_name="Owner"),
+            date=int(time.time()),
+            old_chat_member=ChatMemberLeft(
+                user=User(id=MEMBER_ID, is_bot=False, first_name="Ali"), status="left"),
+            new_chat_member=ChatMemberMember(
+                user=User(id=MEMBER_ID, is_bot=False, first_name="Ali"), status="member"))))
+    assert bot.ban_chat_member.await_count >= 1
+    assert bot.ban_chat_member.await_args.kwargs.get("chat_id") == channel_id
+
+
+@pytest.mark.asyncio
+async def test_global_ban_is_enforced_on_every_message(dispatcher, monkeypatch):
+    """Someone who was banned while already inside the group is removed too."""
+    from app.config import settings as app_settings
+
+    monkeypatch.setattr(app_settings, "global_ban_enabled", True)
+
+    bot = build_fake_bot()
+    await feed(dispatcher, bot, group_message("سلام", user_id=MEMBER_ID))
+    await _gban(dispatcher, bot, MEMBER_ID)
+    bot.ban_chat_member.reset_mock()
+    bot.delete_message.reset_mock()
+
+    await feed(dispatcher, bot, group_message("هنوز اینجام", user_id=MEMBER_ID))
+    assert bot.ban_chat_member.await_count >= 1
+    assert bot.delete_message.await_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_global_unban_frees_the_user(dispatcher, monkeypatch):
+    """«رفع بن سراسری» clears the flag so the member may talk again."""
+    from app.config import settings as app_settings
+
+    monkeypatch.setattr(app_settings, "global_ban_enabled", True)
+
+    bot = build_fake_bot()
+    await _gban(dispatcher, bot, MEMBER_ID)
+    target = group_message("پیام خاطی", user_id=MEMBER_ID)
+    await feed(dispatcher, bot, group_message("رفع بن سراسری", user_id=OWNER_ID,
+                                              reply_to=target))
+    await asyncio.sleep(0.05)
+
+    bot.ban_chat_member.reset_mock()
+    await feed(dispatcher, bot, group_message("برگشتم", user_id=MEMBER_ID))
+    assert bot.ban_chat_member.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_global_ban_is_inert_when_disabled(dispatcher, monkeypatch):
+    """With GLOBAL_BAN_ENABLED unset nothing is banned."""
+    from app.config import settings as app_settings
+
+    monkeypatch.setattr(app_settings, "global_ban_enabled", False)
+
+    bot = build_fake_bot()
+    target = group_message("پیام خاطی", user_id=MEMBER_ID)
+    await feed(dispatcher, bot, group_message("بن سراسری", user_id=OWNER_ID, reply_to=target))
+    await feed(dispatcher, bot, group_message("سلام", user_id=MEMBER_ID))
+    assert bot.ban_chat_member.await_count == 0
+
+
+# --------------------------------------------------------------------------- #
+# Roster: who the bot believes is in the group
+# --------------------------------------------------------------------------- #
+def _reaction(chat_id: int, user: User, *, message_id: int = 555) -> MessageReactionUpdated:
+    return MessageReactionUpdated(
+        chat=Chat(id=chat_id, type="supergroup", title="گروه تست"),
+        message_id=message_id, date=int(time.time()),
+        old_reaction=[], new_reaction=[ReactionTypeEmoji(type="emoji", emoji="👍")],
+        user=user)
+
+
+@pytest.mark.asyncio
+async def test_mention_all_includes_members_who_only_react(dispatcher):
+    """A member who never writes a word is still mentioned (reactions count)."""
+    bot = build_fake_bot()
+    await dispatcher.feed_update(bot, Update(
+        update_id=_next_update_id(),
+        message_reaction=_reaction(CHAT_ID, User(id=MEMBER_ID, is_bot=False,
+                                                 first_name="سارا"))))
+    await feed(dispatcher, bot, group_message("تگ همه", user_id=OWNER_ID))
+    bodies = _mention_bodies(bot)
+    assert bodies and f"tg://user?id={MEMBER_ID}" in bodies[0]
+
+
+@pytest.mark.asyncio
+async def test_mention_all_includes_members_seen_in_a_member_update(dispatcher):
+    """Somebody muted/promoted by an admin ends up on the roster as well."""
+    bot = build_fake_bot()
+    await dispatcher.feed_update(bot, Update(
+        update_id=_next_update_id(), chat_member=ChatMemberUpdated(
+            chat=Chat(id=CHAT_ID, type="supergroup", title="گروه تست"),
+            from_user=User(id=OWNER_ID, is_bot=False, first_name="Owner"),
+            date=int(time.time()),
+            old_chat_member=ChatMemberMember(
+                user=User(id=MEMBER_ID, is_bot=False, first_name="رضا"), status="member"),
+            new_chat_member=ChatMemberMember(
+                user=User(id=MEMBER_ID, is_bot=False, first_name="رضا"), status="member"))))
+    await feed(dispatcher, bot, group_message("تگ همه", user_id=OWNER_ID))
+    bodies = _mention_bodies(bot)
+    assert bodies and f"tg://user?id={MEMBER_ID}" in bodies[0]
+
+
+@pytest.mark.asyncio
+async def test_mention_all_includes_the_telegram_admin_list(dispatcher):
+    """Administrators are always known - Telegram gives us that list."""
+    bot = build_fake_bot()
+    stranger = 555000111
+    bot.get_chat_administrators = AsyncMock(return_value=[
+        ChatMemberAdministrator(
+            user=User(id=stranger, is_bot=False, first_name="مدیر ناشناخته"),
+            status="administrator", is_anonymous=False, can_be_edited=False,
+            can_manage_chat=True, can_delete_messages=True, can_restrict_members=True,
+            can_promote_members=False, can_change_info=True, can_invite_users=True,
+            can_pin_messages=True, can_post_stories=True, can_edit_stories=True,
+            can_delete_stories=True, can_manage_video_chats=True,
+            can_send_welcome_messages=True)])
+    await feed(dispatcher, bot, group_message("تگ همه", user_id=OWNER_ID))
+    bodies = _mention_bodies(bot)
+    assert bodies and f"tg://user?id={stranger}" in bodies[0]
+
+
+@pytest.mark.asyncio
+async def test_mention_all_skips_members_who_left(dispatcher):
+    """Somebody who has left the group is never mentioned."""
+    bot = build_fake_bot()
+    await feed(dispatcher, bot, group_message("سلام", user_id=MEMBER_ID))
+    await dispatcher.feed_update(bot, Update(
+        update_id=_next_update_id(), chat_member=ChatMemberUpdated(
+            chat=Chat(id=CHAT_ID, type="supergroup", title="گروه تست"),
+            from_user=User(id=MEMBER_ID, is_bot=False, first_name="Ali"),
+            date=int(time.time()),
+            old_chat_member=ChatMemberMember(
+                user=User(id=MEMBER_ID, is_bot=False, first_name="Ali"), status="member"),
+            new_chat_member=ChatMemberLeft(
+                user=User(id=MEMBER_ID, is_bot=False, first_name="Ali"), status="left"))))
+    await feed(dispatcher, bot, group_message("تگ همه", user_id=OWNER_ID))
+    bodies = _mention_bodies(bot)
+    assert bodies
+    assert f"tg://user?id={MEMBER_ID}" not in bodies[0]
+
+@pytest.mark.asyncio
+async def test_group_creator_who_is_not_the_bot_owner_has_full_access(dispatcher):
+    """The real owner of a group manages it, even without being the bot owner."""
+    from app.config import settings as app_settings
+
+    creator_id = 987654321
+    assert creator_id != int(app_settings.owner_id or 0)
+
+    bot = build_fake_bot()
+
+    async def get_chat_member(chat_id: int, user_id: int):
+        user = User(id=user_id, is_bot=False, first_name="مالک گروه")
+        if user_id == creator_id:
+            return ChatMemberOwner(user=user, is_anonymous=False, status="creator")
+        return ChatMemberMember(user=user, status="member")
+
+    bot.get_chat_member = AsyncMock(side_effect=get_chat_member)
+
+    await feed(dispatcher, bot, group_message("قفل لینک", user_id=creator_id))
+    texts = [call.kwargs.get("text", "") for call in bot.send_message.await_args_list]
+    assert any("فعال شد" in text for text in texts), texts
+
+    await feed(dispatcher, bot, group_message("تگ همه", user_id=creator_id))
+    bodies = _mention_bodies(bot)
+    assert bodies and f"tg://user?id={creator_id}" in bodies[0]

@@ -23,6 +23,7 @@ from aiogram import Bot, F, Router
 from aiogram.types import Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..config import settings as app_settings
 from ..core.errors import safe_delete
 from ..core.normalization import normalize_text
 from ..db.models import User
@@ -31,6 +32,7 @@ from ..services import (
     antiflood,
     entertainment,
     filters as filter_service,
+    gban as gban_service,
     locks as lock_service,
     moderation as mod,
     permissions,
@@ -96,6 +98,16 @@ async def on_group_message(message: Message, session: AsyncSession, bot: Bot) ->
                     message.voice, message.sticker, message.animation, message.video_note])
     await touch_activity(session, chat.id, user.id, media=is_media)
     await record_message(session, chat.id, user.id, media=is_media)
+
+    # ------------------------------------------------- global ban (owner level)
+    if app_settings.global_ban_enabled:
+        gb_reason = await gban_service.is_banned(session, user.id)
+        if gb_reason is not None:
+            await gban_service.enforce(
+                bot, session, chat_id=chat.id, chat_title=chat.title or "",
+                user_id=user.id, user_name=user.full_name or "", reason=gb_reason,
+                message_id=message.message_id, clean=True)
+            return
 
     actor = await permissions.build_actor(bot, chat.id, user.id, session=session)
     if sender_chat is not None:
