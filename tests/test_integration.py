@@ -1186,9 +1186,21 @@ async def test_long_lock_threshold_is_adjustable(dispatcher, session):
 # --------------------------------------------------------------------------- #
 # «تگ همه» - mentioning every member of the group
 # --------------------------------------------------------------------------- #
-def _mention_bodies(bot) -> list[str]:
-    return [call.kwargs.get("text", "") for call in bot.send_message.await_args_list
-            if "tg://user?id=" in (call.kwargs.get("text") or "")]
+def _mention_calls(bot):
+    """Every send_message call that carries real mention entities."""
+    return [call for call in bot.send_message.await_args_list
+            if call.kwargs.get("entities")]
+
+
+def _mention_ids(bot) -> list[int]:
+    """Every user id the bot mentioned as a ``text_mention`` entity."""
+    ids: list[int] = []
+    for call in _mention_calls(bot):
+        for entity in call.kwargs.get("entities") or []:
+            user = getattr(entity, "user", None)
+            if user is not None:
+                ids.append(int(user.id))
+    return ids
 
 
 @pytest.mark.asyncio
@@ -1199,12 +1211,13 @@ async def test_mention_all_mentions_every_known_member(dispatcher, monkeypatch):
     await feed(dispatcher, bot, group_message("من هم هستم", user_id=PROMOTED_ADMIN_ID))
     await feed(dispatcher, bot, group_message("تگ همه", user_id=OWNER_ID))
 
-    bodies = _mention_bodies(bot)
-    assert len(bodies) == 1, "everything must fit into a single message"
-    body = bodies[0]
+    ids = _mention_ids(bot)
     for uid in (MEMBER_ID, PROMOTED_ADMIN_ID, OWNER_ID):
-        assert f'tg://user?id={uid}' in body, uid
-    assert len(body) <= 4096
+        assert uid in ids, (uid, ids)
+    # Telegram only notifies the first ~5 mentions of a message.
+    for call in _mention_calls(bot):
+        assert 1 <= len(call.kwargs["entities"]) <= 5
+        assert len(call.kwargs["text"]) <= 4096
 
 
 @pytest.mark.asyncio
@@ -1212,8 +1225,7 @@ async def test_mention_all_includes_the_caller_in_a_fresh_group(dispatcher):
     """A group where nobody has written yet still mentions the caller."""
     bot = build_fake_bot()
     await feed(dispatcher, bot, group_message("تگ همه", user_id=OWNER_ID))
-    bodies = _mention_bodies(bot)
-    assert bodies and f"tg://user?id={OWNER_ID}" in bodies[-1]
+    assert OWNER_ID in _mention_ids(bot)
 
 
 @pytest.mark.asyncio
@@ -1222,7 +1234,7 @@ async def test_mention_all_is_admin_only(dispatcher):
     bot = build_fake_bot()
     await feed(dispatcher, bot, group_message("سلام", user_id=MEMBER_ID))
     await feed(dispatcher, bot, group_message("تگ همه", user_id=MEMBER_ID))
-    assert _mention_bodies(bot) == []
+    assert _mention_ids(bot) == []
     texts = [call.kwargs.get("text", "") for call in bot.send_message.await_args_list]
     assert any("فقط برای مدیران" in text for text in texts), texts
 
@@ -1235,22 +1247,137 @@ async def test_mention_all_can_be_repeated_without_a_cooldown(dispatcher):
     await feed(dispatcher, bot, group_message("تگ همه", user_id=OWNER_ID))
     await feed(dispatcher, bot, group_message("تگ همه", user_id=OWNER_ID))
 
-    assert len(_mention_bodies(bot)) == 2
+    assert len(_mention_calls(bot)) == 2
     texts = [call.kwargs.get("text", "") for call in bot.send_message.await_args_list]
     assert not any("⏳" in text for text in texts), texts
 
 
-def test_mention_all_splits_into_telegram_sized_messages():
-    """A huge member list is split instead of hitting the 4096 char limit."""
+def test_mention_all_splits_into_notifying_batches():
+    """Telegram notifies only the first ~5 mentions - so batches of five."""
     from app.services import mention_all as mention_service
 
-    members = [(1000 + index, "نام کاربر") for index in range(400)]
-    messages = mention_service.build_messages(members)
-    assert len(messages) > 1
-    for message in messages:
-        assert len(message) <= 4096
-    mentioned = sum(message.count("tg://user?id=") for message in messages)
-    assert mentioned == len(members)
+    members = [(1000 + index, "نام کاربر") for index in range(23)]
+    batches = mention_service.build_batches(members)
+
+    assert len(batches) == 5                      # 5 + 5 + 5 + 5 + 3
+    assert mention_service.mentioned_ids(batches) == [1000 + i for i in range(23)]
+    for text, entities in batches:
+        assert len(text) <= 4096
+        assert 1 <= len(entities) <= 5
+        # every entity must point at the name it is supposed to highlight
+        # (Telegram counts offsets in UTF-16 code units, Python in code points)
+        units = text.encode("utf-16-le")
+        for entity in entities:
+            start, end = entity.offset * 2, (entity.offset + entity.length) * 2
+            assert units[start:end].decode("utf-16-le") == "نام کاربر"
+            assert entity.type == "text_mention"
+            assert entity.user is not None
+
+    # the header counts the batches for the admins
+    assert "۱/۵" in batches[0][0]
+    assert "۵/۵" in batches[-1][0]
+
+
+# --------------------------------------------------------------------------- #
+# Roster: who the bot believes is in the group
+# --------------------------------------------------------------------------- #
+def _reaction(chat_id: int, user: User, *, message_id: int = 555) -> MessageReactionUpdated:
+    return MessageReactionUpdated(
+        chat=Chat(id=chat_id, type="supergroup", title="گروه تست"),
+        message_id=message_id, date=int(time.time()),
+        old_reaction=[], new_reaction=[ReactionTypeEmoji(type="emoji", emoji="👍")],
+        user=user)
+
+
+@pytest.mark.asyncio
+async def test_mention_all_includes_members_who_only_react(dispatcher):
+    """A member who never writes a word is still mentioned (reactions count)."""
+    bot = build_fake_bot()
+    await dispatcher.feed_update(bot, Update(
+        update_id=_next_update_id(),
+        message_reaction=_reaction(CHAT_ID, User(id=MEMBER_ID, is_bot=False,
+                                                 first_name="سارا"))))
+    await feed(dispatcher, bot, group_message("تگ همه", user_id=OWNER_ID))
+    assert MEMBER_ID in _mention_ids(bot)
+
+
+@pytest.mark.asyncio
+async def test_mention_all_includes_members_seen_in_a_member_update(dispatcher):
+    """Somebody muted/promoted by an admin ends up on the roster as well."""
+    bot = build_fake_bot()
+    await dispatcher.feed_update(bot, Update(
+        update_id=_next_update_id(), chat_member=ChatMemberUpdated(
+            chat=Chat(id=CHAT_ID, type="supergroup", title="گروه تست"),
+            from_user=User(id=OWNER_ID, is_bot=False, first_name="Owner"),
+            date=int(time.time()),
+            old_chat_member=ChatMemberMember(
+                user=User(id=MEMBER_ID, is_bot=False, first_name="رضا"), status="member"),
+            new_chat_member=ChatMemberMember(
+                user=User(id=MEMBER_ID, is_bot=False, first_name="رضا"), status="member"))))
+    await feed(dispatcher, bot, group_message("تگ همه", user_id=OWNER_ID))
+    assert MEMBER_ID in _mention_ids(bot)
+
+
+@pytest.mark.asyncio
+async def test_mention_all_includes_the_telegram_admin_list(dispatcher):
+    """Administrators are always known - Telegram gives us that list."""
+    bot = build_fake_bot()
+    stranger = 555000111
+    bot.get_chat_administrators = AsyncMock(return_value=[
+        ChatMemberAdministrator(
+            user=User(id=stranger, is_bot=False, first_name="مدیر ناشناخته"),
+            status="administrator", is_anonymous=False, can_be_edited=False,
+            can_manage_chat=True, can_delete_messages=True, can_restrict_members=True,
+            can_promote_members=False, can_change_info=True, can_invite_users=True,
+            can_pin_messages=True, can_post_stories=True, can_edit_stories=True,
+            can_delete_stories=True, can_manage_video_chats=True,
+            can_send_welcome_messages=True)])
+    await feed(dispatcher, bot, group_message("تگ همه", user_id=OWNER_ID))
+    assert stranger in _mention_ids(bot)
+
+
+@pytest.mark.asyncio
+async def test_mention_all_skips_members_who_left(dispatcher):
+    """Somebody who has left the group is never mentioned."""
+    bot = build_fake_bot()
+    await feed(dispatcher, bot, group_message("سلام", user_id=MEMBER_ID))
+    await dispatcher.feed_update(bot, Update(
+        update_id=_next_update_id(), chat_member=ChatMemberUpdated(
+            chat=Chat(id=CHAT_ID, type="supergroup", title="گروه تست"),
+            from_user=User(id=MEMBER_ID, is_bot=False, first_name="Ali"),
+            date=int(time.time()),
+            old_chat_member=ChatMemberMember(
+                user=User(id=MEMBER_ID, is_bot=False, first_name="Ali"), status="member"),
+            new_chat_member=ChatMemberLeft(
+                user=User(id=MEMBER_ID, is_bot=False, first_name="Ali"), status="left"))))
+    await feed(dispatcher, bot, group_message("تگ همه", user_id=OWNER_ID))
+    assert MEMBER_ID not in _mention_ids(bot)
+
+
+@pytest.mark.asyncio
+async def test_group_creator_who_is_not_the_bot_owner_has_full_access(dispatcher):
+    """The real owner of a group manages it, even without being the bot owner."""
+    from app.config import settings as app_settings
+
+    creator_id = 987654321
+    assert creator_id != int(app_settings.owner_id or 0)
+
+    bot = build_fake_bot()
+
+    async def get_chat_member(chat_id: int, user_id: int):
+        user = User(id=user_id, is_bot=False, first_name="مالک گروه")
+        if user_id == creator_id:
+            return ChatMemberOwner(user=user, is_anonymous=False, status="creator")
+        return ChatMemberMember(user=user, status="member")
+
+    bot.get_chat_member = AsyncMock(side_effect=get_chat_member)
+
+    await feed(dispatcher, bot, group_message("قفل لینک", user_id=creator_id))
+    texts = [call.kwargs.get("text", "") for call in bot.send_message.await_args_list]
+    assert any("فعال شد" in text for text in texts), texts
+
+    await feed(dispatcher, bot, group_message("تگ همه", user_id=creator_id))
+    assert creator_id in _mention_ids(bot)
 
 
 # --------------------------------------------------------------------------- #
@@ -1396,109 +1523,44 @@ async def test_global_ban_is_inert_when_disabled(dispatcher, monkeypatch):
     await feed(dispatcher, bot, group_message("سلام", user_id=MEMBER_ID))
     assert bot.ban_chat_member.await_count == 0
 
-
-# --------------------------------------------------------------------------- #
-# Roster: who the bot believes is in the group
-# --------------------------------------------------------------------------- #
-def _reaction(chat_id: int, user: User, *, message_id: int = 555) -> MessageReactionUpdated:
-    return MessageReactionUpdated(
-        chat=Chat(id=chat_id, type="supergroup", title="گروه تست"),
-        message_id=message_id, date=int(time.time()),
-        old_reaction=[], new_reaction=[ReactionTypeEmoji(type="emoji", emoji="👍")],
-        user=user)
-
-
 @pytest.mark.asyncio
-async def test_mention_all_includes_members_who_only_react(dispatcher):
-    """A member who never writes a word is still mentioned (reactions count)."""
+async def test_mention_all_sends_everyone_in_small_notifying_batches(dispatcher, monkeypatch):
+    """A big roster is split into several messages so every member is notified.
+
+    Telegram only pushes a notification for the first ~5 mentions of a
+    message, so one long message would silently skip most of the group.
+    """
+    from app.services import mention_all as mention_service
+
+    monkeypatch.setattr(mention_service, "SEND_DELAY", 0.0)
+
     bot = build_fake_bot()
-    await dispatcher.feed_update(bot, Update(
-        update_id=_next_update_id(),
-        message_reaction=_reaction(CHAT_ID, User(id=MEMBER_ID, is_bot=False,
-                                                 first_name="سارا"))))
-    await feed(dispatcher, bot, group_message("تگ همه", user_id=OWNER_ID))
-    bodies = _mention_bodies(bot)
-    assert bodies and f"tg://user?id={MEMBER_ID}" in bodies[0]
+    crowd = [4100 + index for index in range(12)]
+    for user_id in crowd:
+        await feed(dispatcher, bot, group_message(f"سلام از {user_id}", user_id=user_id))
 
+    await feed(dispatcher, bot, group_message("تگ همه", user_id=OWNER_ID))
+
+    calls = _mention_calls(bot)
+    assert len(calls) == 3, [len(call.kwargs["entities"]) for call in calls]
+    assert sorted(_mention_ids(bot)) == sorted(crowd + [OWNER_ID])
+    for call in calls:
+        assert len(call.kwargs["entities"]) <= mention_service.MENTIONS_PER_MESSAGE
 
 @pytest.mark.asyncio
-async def test_mention_all_includes_members_seen_in_a_member_update(dispatcher):
-    """Somebody muted/promoted by an admin ends up on the roster as well."""
-    bot = build_fake_bot()
-    await dispatcher.feed_update(bot, Update(
-        update_id=_next_update_id(), chat_member=ChatMemberUpdated(
-            chat=Chat(id=CHAT_ID, type="supergroup", title="گروه تست"),
-            from_user=User(id=OWNER_ID, is_bot=False, first_name="Owner"),
-            date=int(time.time()),
-            old_chat_member=ChatMemberMember(
-                user=User(id=MEMBER_ID, is_bot=False, first_name="رضا"), status="member"),
-            new_chat_member=ChatMemberMember(
-                user=User(id=MEMBER_ID, is_bot=False, first_name="رضا"), status="member"))))
-    await feed(dispatcher, bot, group_message("تگ همه", user_id=OWNER_ID))
-    bodies = _mention_bodies(bot)
-    assert bodies and f"tg://user?id={MEMBER_ID}" in bodies[0]
+async def test_mention_messages_are_sent_without_a_parse_mode(dispatcher):
+    """Regression: the bot's default ``parse_mode=HTML`` would kill the mentions.
 
-
-@pytest.mark.asyncio
-async def test_mention_all_includes_the_telegram_admin_list(dispatcher):
-    """Administrators are always known - Telegram gives us that list."""
-    bot = build_fake_bot()
-    stranger = 555000111
-    bot.get_chat_administrators = AsyncMock(return_value=[
-        ChatMemberAdministrator(
-            user=User(id=stranger, is_bot=False, first_name="مدیر ناشناخته"),
-            status="administrator", is_anonymous=False, can_be_edited=False,
-            can_manage_chat=True, can_delete_messages=True, can_restrict_members=True,
-            can_promote_members=False, can_change_info=True, can_invite_users=True,
-            can_pin_messages=True, can_post_stories=True, can_edit_stories=True,
-            can_delete_stories=True, can_manage_video_chats=True,
-            can_send_welcome_messages=True)])
-    await feed(dispatcher, bot, group_message("تگ همه", user_id=OWNER_ID))
-    bodies = _mention_bodies(bot)
-    assert bodies and f"tg://user?id={stranger}" in bodies[0]
-
-
-@pytest.mark.asyncio
-async def test_mention_all_skips_members_who_left(dispatcher):
-    """Somebody who has left the group is never mentioned."""
+    When ``parse_mode`` and ``entities`` are sent together, Telegram parses the
+    text again and drops the ``text_mention`` entities - so nobody would be
+    notified at all.  The mention messages must carry entities *only*.
+    """
     bot = build_fake_bot()
     await feed(dispatcher, bot, group_message("سلام", user_id=MEMBER_ID))
-    await dispatcher.feed_update(bot, Update(
-        update_id=_next_update_id(), chat_member=ChatMemberUpdated(
-            chat=Chat(id=CHAT_ID, type="supergroup", title="گروه تست"),
-            from_user=User(id=MEMBER_ID, is_bot=False, first_name="Ali"),
-            date=int(time.time()),
-            old_chat_member=ChatMemberMember(
-                user=User(id=MEMBER_ID, is_bot=False, first_name="Ali"), status="member"),
-            new_chat_member=ChatMemberLeft(
-                user=User(id=MEMBER_ID, is_bot=False, first_name="Ali"), status="left"))))
     await feed(dispatcher, bot, group_message("تگ همه", user_id=OWNER_ID))
-    bodies = _mention_bodies(bot)
-    assert bodies
-    assert f"tg://user?id={MEMBER_ID}" not in bodies[0]
 
-@pytest.mark.asyncio
-async def test_group_creator_who_is_not_the_bot_owner_has_full_access(dispatcher):
-    """The real owner of a group manages it, even without being the bot owner."""
-    from app.config import settings as app_settings
-
-    creator_id = 987654321
-    assert creator_id != int(app_settings.owner_id or 0)
-
-    bot = build_fake_bot()
-
-    async def get_chat_member(chat_id: int, user_id: int):
-        user = User(id=user_id, is_bot=False, first_name="مالک گروه")
-        if user_id == creator_id:
-            return ChatMemberOwner(user=user, is_anonymous=False, status="creator")
-        return ChatMemberMember(user=user, status="member")
-
-    bot.get_chat_member = AsyncMock(side_effect=get_chat_member)
-
-    await feed(dispatcher, bot, group_message("قفل لینک", user_id=creator_id))
-    texts = [call.kwargs.get("text", "") for call in bot.send_message.await_args_list]
-    assert any("فعال شد" in text for text in texts), texts
-
-    await feed(dispatcher, bot, group_message("تگ همه", user_id=creator_id))
-    bodies = _mention_bodies(bot)
-    assert bodies and f"tg://user?id={creator_id}" in bodies[0]
+    calls = _mention_calls(bot)
+    assert calls, "no mention message was sent"
+    for call in calls:
+        assert call.kwargs.get("parse_mode") is None, call.kwargs
+        assert call.kwargs.get("entities")
