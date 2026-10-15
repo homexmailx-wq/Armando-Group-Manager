@@ -157,36 +157,55 @@ class GroupApprovalMiddleware(BaseMiddleware):
         if chat is None or chat.type not in {"group", "supergroup"}:
             return await handler(event, data)  # private chats are never gated
 
-        # Update-level middlewares run before the session middleware, so a
-        # short-lived session is borrowed when none is available yet.
+        # The bot's own membership updates must always reach the handler. In
+        # particular, do not try to message a group after Telegram has removed
+        # the bot from it.
+        if getattr(event, "my_chat_member", None) is not None:
+            return await handler(event, data)
+
+        # This update-level middleware runs before DbSessionMiddleware, so it
+        # opens a short-lived session only for the approval check.
         session: AsyncSession | None = data.get("session")
-        own_session = None
-        if session is None:
+        own_session = session is None
+        if own_session:
             try:
-                own_session = get_sessionmaker()()
-                session = own_session
+                session = get_sessionmaker()()
             except Exception as exc:  # noqa: BLE001
                 logger.debug("approval gate could not open a session: %s", exc)
                 return await handler(event, data)
 
+        approved = False
+        check_failed = False
         try:
             from ..db.models import Chat
 
             row = await session.get(Chat, chat.id)
-            if row is not None and row.is_approved:
-                return await handler(event, data)
+            approved = bool(row is not None and row.is_approved)
         except Exception as exc:  # noqa: BLE001 - never break the bot for a gate
             logger.debug("approval check failed: %s", exc)
-            return await handler(event, data)
+            check_failed = True
         finally:
-            if own_session is not None:
-                await own_session.close()
+            if own_session and session is not None:
+                await session.close()
+
+        if check_failed or approved:
+            return await handler(event, data)
 
         # Not whitelisted yet: ask the owner (throttled) and remind the group
-        # at most once an hour, then stay silent.
+        # at most once an hour, then stay silent. Never reuse the just-closed
+        # approval-check session: the previous version reopened it here and
+        # left the resulting SQLite connection checked out until GC.
         bot = data.get("bot")
         if bot is not None and getattr(event, "message", None) is not None:
             from ..handlers.approval import maybe_notify_unapproved
 
-            await maybe_notify_unapproved(bot, session, chat)
+            if own_session:
+                try:
+                    async with get_sessionmaker()() as notify_session:
+                        await maybe_notify_unapproved(bot, notify_session, chat)
+                        await notify_session.commit()
+                except Exception as exc:  # noqa: BLE001 - the gate must not crash updates
+                    logger.debug("ارسال اعلان تایید گروه ناموفق بود: %s", exc)
+            else:
+                await maybe_notify_unapproved(bot, session, chat)
         return None

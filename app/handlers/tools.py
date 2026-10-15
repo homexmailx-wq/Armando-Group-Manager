@@ -941,7 +941,6 @@ async def _describe_chat(ctx: CommandContext, chat_id: int | str) -> bool:
     if chat.username:
         lines_out.append("🌐 دسترسی: <b>عمومی</b>")
         lines_out.append(f"🏷 نام کاربری: @{chat.username}")
-        lines_out.append(f"🌍 لینک: https://t.me/{chat.username}")
     else:
         lines_out.append("🌐 دسترسی: <b>خصوصی</b> (نام کاربری ندارد)")
 
@@ -958,9 +957,6 @@ async def _describe_chat(ctx: CommandContext, chat_id: int | str) -> bool:
         if len(desc) > 200:
             desc = desc[:200] + "…"
         lines_out.append(f"📋 توضیحات: {desc}")
-
-    if getattr(chat, "invite_link", None):
-        lines_out.append(f"🔗 لینک دعوت: {chat.invite_link}")
 
     await ctx.reply("\n".join(lines_out))
     return True
@@ -994,10 +990,7 @@ async def cmd_chat_id(ctx: CommandContext) -> None:
         return
 
     if not await _describe_chat(ctx, ctx.chat_id):
-        await ctx.reply(f"💬 شناسه این چت: <code>{ctx.chat_id}</code>\n"
-                        f"🔢 شناسه شما: <code>{ctx.user_id}</code>")
-        return
-    await ctx.reply(f"🔢 شناسه شما: <code>{ctx.user_id}</code>")
+        await ctx.reply(f"💬 شناسه گروه: <code>{ctx.chat_id}</code>")
 
 
 # --------------------------------------------------------------------------- #

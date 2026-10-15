@@ -40,9 +40,9 @@ BANNER = r"""
 
 def build_dispatcher() -> Dispatcher:
     dispatcher = Dispatcher(name="armando")
-    # Database session must be available to every handler.
-    # Outer middlewares run in REVERSE registration order, so the approval gate
-    # is registered first to make sure the session middleware has run already.
+    # The approval gate runs before the per-update database middleware. It
+    # creates a short-lived session for its check and lets membership updates
+    # reach their handlers so bot removals are recorded correctly.
     dispatcher.update.outer_middleware(GroupApprovalMiddleware())
     dispatcher.update.outer_middleware(DbSessionMiddleware())
     dispatcher.update.outer_middleware(ThrottlingMiddleware())

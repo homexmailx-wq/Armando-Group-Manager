@@ -260,7 +260,8 @@ async def kick_user(bot: Bot, session: AsyncSession, *, chat_id: int, actor: Act
     who = mention(target_id, target_name or await _display_name(session, target_id))
     if sticky:
         return (f"👢 کاربر {who} از گروه اخراج شد و بن ماندگار شد.\n"
-                f"🔒 تا زمان رفع بن توسط مدیر، امکان بازگشت با هیچ لینکی ندارد.")
+                "🔒 در سوپرگروه، تلگرام تا رفع‌بن توسط مدیر جلوی ورود دوباره با لینک را می‌گیرد؛ "
+                "در گروه معمولی این تضمین وجود ندارد.")
     return (f"👢 کاربر {who} از گروه اخراج شد.")
 
 

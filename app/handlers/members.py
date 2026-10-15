@@ -56,12 +56,13 @@ async def _joined_at(session: AsyncSession, chat_id: int, user_id: int):
 
 
 async def _leave_guard(bot: Bot, session: AsyncSession, chat_id: int, user,
-                       settings: dict, joined_at) -> None:
+                       settings: dict, joined_at,
+                       member_status: str | None = None) -> None:
     """Ban members who leave, and explain it with one-tap undo buttons."""
     if not leave_guard.is_enabled(settings):
         return
     reason = await leave_guard.check_leave(bot, chat_id, user.id, settings, joined_at,
-                                           session=session)
+                                           session=session, member_status=member_status)
     if reason is None:
         return
     from ..keyboards.factory import cb, markup, primary, row, success
@@ -163,10 +164,10 @@ async def on_new_members(message: Message, session: AsyncSession, bot: Bot) -> N
 
 @router.chat_member()
 async def on_chat_member(update: ChatMemberUpdated, session: AsyncSession, bot: Bot) -> None:
-    """A member status changed - used to enforce the global ban in every chat.
+    """Handle member status transitions, including leave bans and global bans.
 
-    Telegram only sends these updates to administrators, which is exactly the
-    situation a global ban needs (groups **and** channels the bot guards).
+    Telegram sends these updates to chat administrators; the leave guard uses
+    the old/new status pair to distinguish a voluntary leave from an admin kick.
     """
     old, new = update.old_chat_member, update.new_chat_member
     if old is None or new is None:
@@ -174,6 +175,17 @@ async def on_chat_member(update: ChatMemberUpdated, session: AsyncSession, bot: 
     user = new.user
     if user is None or user.id == bot.id:
         return
+
+    # The structured chat_member update is the reliable signal for a voluntary
+    # departure. Run the leave guard only for ordinary members; never treat an
+    # administrator's departure or an admin-issued kick as an automatic ban.
+    left_voluntarily = (old.status in {"member", "restricted"}
+                        and new.status == "left")
+    if left_voluntarily:
+        leave_settings = await get_settings_cached(session, update.chat.id)
+        joined_at = await _joined_at(session, update.chat.id, user.id)
+        await _leave_guard(bot, session, update.chat.id, user,
+                           leave_settings, joined_at, member_status=old.status)
 
     # Every status change teaches the bot about a member (somebody who is
     # muted, promoted or restricted is often a member who never speaks).
@@ -223,16 +235,12 @@ async def on_left_member(message: Message, session: AsyncSession, bot: Bot) -> N
             chat.is_active = False
         await connection_service.drop_chat(session, message.chat.id)
         return
-    chat_settings = await get_settings_cached(session, message.chat.id)
-    joined_at = await _joined_at(session, message.chat.id, user.id)
     await welcome_service.record_leave(session, message.chat.id, user.id)
     if settings_obj.clean_leave:
         await safe_delete(bot, message.chat.id, message.message_id, context="clean_leave")
     if settings_obj.goodbye_enabled:
         await welcome_service.send_goodbye(bot, session, chat_id=message.chat.id, user=user,
                                            chat_title=message.chat.title or "")
-    await _leave_guard(bot, session, chat_id=message.chat.id, user=user,
-                       settings=chat_settings, joined_at=joined_at)
 
 
 @router.message(F.pinned_message | F.new_chat_title | F.new_chat_photo |
