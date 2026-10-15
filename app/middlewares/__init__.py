@@ -182,12 +182,11 @@ class GroupApprovalMiddleware(BaseMiddleware):
             if own_session is not None:
                 await own_session.close()
 
-        # Not whitelisted yet: remind the group once, then stay silent.
+        # Not whitelisted yet: ask the owner (throttled) and remind the group
+        # at most once an hour, then stay silent.
         bot = data.get("bot")
         if bot is not None and getattr(event, "message", None) is not None:
-            await safe_send(bot, chat.id,
-                            "⏳ <b>ربات هنوز فعال نشده است.</b>\n\n"
-                            "درخواست فعال‌سازی برای مالک ربات ارسال شد؛ "
-                            "پس از تایید، ربات در این گروه کار خواهد کرد.",
-                            parse_mode="HTML")
+            from ..handlers.approval import maybe_notify_unapproved
+
+            await maybe_notify_unapproved(bot, session, chat)
         return None

@@ -60,7 +60,8 @@ async def _leave_guard(bot: Bot, session: AsyncSession, chat_id: int, user,
     """Ban members who leave, and explain it with one-tap undo buttons."""
     if not leave_guard.is_enabled(settings):
         return
-    reason = await leave_guard.check_leave(bot, chat_id, user.id, settings, joined_at)
+    reason = await leave_guard.check_leave(bot, chat_id, user.id, settings, joined_at,
+                                           session=session)
     if reason is None:
         return
     from ..keyboards.factory import cb, markup, primary, row, success
@@ -252,11 +253,25 @@ async def on_join_request(update: ChatJoinRequest, session: AsyncSession,
     Globally banned users are declined instead of waved through.
     """
     settings_obj = await get_settings_cached(session, update.chat.id)
-    if not settings_obj.get("auto_approve_join_requests"):
-        return
 
     user = update.from_user
     await get_or_create_user(session, user)
+
+    # Entry path #1: a member who is still banned in THIS group must never get
+    # back in, however they try - not even through a join request that an admin
+    # (or the auto-approve rule) would otherwise accept.
+    if await mod.has_active_ban(session, update.chat.id, user.id):
+        try:
+            await bot.decline_chat_join_request(chat_id=update.chat.id,
+                                                user_id=user.id)
+            logger.info("join request declined (active ban) user=%s chat=%s",
+                        user.id, update.chat.id)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("decline join request failed: %s", exc)
+        return
+
+    if not settings_obj.get("auto_approve_join_requests"):
+        return
 
     if app_settings.global_ban_enabled:
         reason = await gban_service.is_banned(session, user.id)

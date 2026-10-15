@@ -45,8 +45,14 @@ def status_text(settings: dict) -> str:
 
 
 async def check_leave(bot: Bot, chat_id: int, user_id: int, settings: dict,
-                      joined_at: datetime | None = None) -> str | None:
-    """Ban the member if a leave rule fires; return the Persian reason or None."""
+                      joined_at: datetime | None = None,
+                      session=None) -> str | None:
+    """Ban the member if a leave rule fires; return the Persian reason or None.
+
+    ``session`` lets the guard write a ``ban_records`` row.  Without it the bot
+    would ban the member on Telegram's side while having no idea they are
+    banned - so the sticky-ban re-entry check could never fire for them.
+    """
     if not is_enabled(settings):
         return None
     if not await bot_has_right(bot, chat_id, "can_restrict_members"):
@@ -78,5 +84,18 @@ async def check_leave(bot: Bot, chat_id: int, user_id: int, settings: dict,
                              default=None, context="leave_guard_ban", log=True)
     if banned is None:
         return None
+
+    if session is not None:
+        try:
+            from ..db.models import BanRecord
+
+            session.add(BanRecord(
+                chat_id=chat_id, user_id=user_id, banned_by=None,
+                reason=(reason or "")[:500], scope="chat", active=True,
+                until=None, created_at=datetime.utcnow()))
+            await session.flush()
+        except Exception as exc:  # noqa: BLE001 - never lose the ban itself
+            logger.warning("could not record the leave-guard ban: %s", exc)
+
     logger.info("leave guard banned user=%s in chat=%s (%s)", user_id, chat_id, reason)
     return reason

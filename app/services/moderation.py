@@ -289,6 +289,27 @@ async def enforce_sticky_ban(bot: Bot, session: AsyncSession, chat_id: int,
     return bool(removed)
 
 
+async def has_active_ban(session: AsyncSession, chat_id: int, user_id: int) -> bool:
+    """True when ``user_id`` is still banned in ``chat_id``.
+
+    Used to close the *join request* entry path: a banned member must not be
+    waved back in by an admin (or by the auto-approve rule) while the ban
+    stands.  An expired temporary ban is treated as no ban at all.
+    """
+    from sqlalchemy import select as _select
+
+    record = (await session.execute(
+        _select(BanRecord).where(BanRecord.chat_id == chat_id,
+                                 BanRecord.user_id == user_id,
+                                 BanRecord.active.is_(True)))).scalars().first()
+    if record is None:
+        return False
+    if record.until is not None and record.until <= datetime.utcnow():
+        record.active = False
+        return False
+    return True
+
+
 async def mute_user(bot: Bot, session: AsyncSession, *, chat_id: int, actor: Actor,
                     target_id: int, target_name: str = "", duration: int | None = None,
                     reason: str = "", delete_message_id: int | None = None,

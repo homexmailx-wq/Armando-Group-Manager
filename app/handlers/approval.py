@@ -33,6 +33,30 @@ logger = logging.getLogger("armando.approval")
 
 CALLBACK_PREFIX = "gapr:"
 
+# Throttles so an unapproved group never spams the group chat or the owner.
+_NOTICE_TTL = 3600.0        # remind the group at most once an hour
+_REQUEST_TTL = 6 * 3600.0   # re-ask the owner at most every six hours
+_notice_at: dict[int, float] = {}
+_request_at: dict[int, float] = {}
+
+
+def _throttled(store: dict[int, float], key: int, ttl: float) -> bool:
+    """True when the action may run now; records the attempt when it may."""
+    import time
+
+    now = time.monotonic()
+    last = store.get(key)
+    if last is not None and now - last < ttl:
+        return False
+    store[key] = now
+    return True
+
+
+def forget(chat_id: int) -> None:
+    """Drop the throttles for a chat (used after approval / in tests)."""
+    _notice_at.pop(chat_id, None)
+    _request_at.pop(chat_id, None)
+
 
 def approval_keyboard(chat_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
@@ -43,7 +67,8 @@ def approval_keyboard(chat_id: int) -> InlineKeyboardMarkup:
     ]])
 
 
-async def request_approval(bot: Bot, session: AsyncSession, chat: ChatType) -> bool:
+async def request_approval(bot: Bot, session: AsyncSession, chat: ChatType,
+                           *, force: bool = False) -> bool:
     """Ask the bot owner to whitelist ``chat``.  Returns False when disabled."""
     if not app_settings.require_group_approval:
         return False
@@ -54,20 +79,52 @@ async def request_approval(bot: Bot, session: AsyncSession, chat: ChatType) -> b
     from ..db.models import Chat
 
     row = await session.get(Chat, chat.id)
-    if row is None:
-        return False
+    if row is None:  # the chat row may not exist yet on the very first update
+        row = Chat(id=chat.id, title=chat.title or "", type=chat.type or "")
+        session.add(row)
+        try:
+            await session.flush()
+        except Exception:  # noqa: BLE001 - another update may have created it
+            await session.rollback()
+            row = await session.get(Chat, chat.id)
+            if row is None:
+                return False
     if row.is_approved:
         return False
 
-    await safe_send(
+    if not force and not _throttled(_request_at, chat.id, _REQUEST_TTL):
+        return False
+
+    sent = await safe_send(
         bot, app_settings.owner_id,
         f"🔔 <b>درخواست فعال‌سازی</b>\n\n"
         f"گروه: {chat.title or '(بدون عنوان)'}\n"
         f"شناسه: <code>{chat.id}</code>\n"
         f"نوع: {chat.type}",
         parse_mode="HTML", reply_markup=approval_keyboard(chat.id))
+    if sent is None:
+        _request_at.pop(chat.id, None)  # allow a retry on the next message
+        logger.warning("could not deliver the approval request for chat=%s",
+                       chat.id)
+        return False
     logger.info("approval requested for chat=%s", chat.id)
     return True
+
+
+async def maybe_notify_unapproved(bot: Bot, session: AsyncSession, chat: ChatType) -> None:
+    """Owner request + a single, throttled notice inside the group.
+
+    Called from the gate for every update of a group that is not whitelisted.
+    Both messages are rate limited so the group is never flooded.
+    """
+    await request_approval(bot, session, chat)
+    if not _throttled(_notice_at, chat.id, _NOTICE_TTL):
+        return
+    await safe_send(bot, chat.id,
+                    "⏳ <b>ربات هنوز فعال نشده است.</b>\n\n"
+                    "درخواست فعال‌سازی برای مالک ربات ارسال شد؛ "
+                    "پس از تایید، ربات در این گروه کار خواهد کرد.",
+                    parse_mode="HTML")
 
 
 async def _resolve(bot: Bot, session: AsyncSession, chat_id: int, approve: bool,
