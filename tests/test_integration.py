@@ -1682,3 +1682,83 @@ async def test_join_request_is_left_alone_when_disabled(dispatcher):
         bot, Update(update_id=_next_update_id(), chat_join_request=request))
 
     assert bot.approve_chat_join_request.await_count == 0
+
+
+# --------------------------------------------------------------------------- #
+# Chat information (group / channel)
+# --------------------------------------------------------------------------- #
+def _bot_with_chat_info(bot, chat, member_count: int = 137):
+    """Teach the fake bot to answer getChat / getChatMemberCount."""
+    async def _get_chat(chat_id):
+        return chat
+
+    async def _count(chat_id):
+        return member_count
+
+    bot.get_chat.side_effect = _get_chat
+    bot.get_chat_member_count.side_effect = _count
+    return bot
+
+
+@pytest.mark.asyncio
+async def test_chat_id_shows_full_information(dispatcher):
+    """«آیدی گروه» reports type, title, id, visibility and member count."""
+    from aiogram.types import Chat as ChatType
+    from .test_integration import build_fake_bot, feed, group_message, OWNER_ID, CHAT_ID
+
+    bot = _bot_with_chat_info(build_fake_bot(), ChatType(
+        id=CHAT_ID, type="supergroup", title="گروه تست", username="testgroup"))
+    await feed(dispatcher, bot, group_message("آیدی گروه", user_id=OWNER_ID))
+    text = "\n".join(c.kwargs.get("text", "") for c in bot.send_message.await_args_list)
+    assert "سوپرگروه" in text and "@testgroup" in text
+    assert "عمومی" in text and str(CHAT_ID) in text
+
+
+@pytest.mark.asyncio
+async def test_chat_id_marks_a_private_group(dispatcher):
+    """A group without a username must be reported as private."""
+    from aiogram.types import Chat as ChatType
+    from .test_integration import build_fake_bot, feed, group_message, OWNER_ID, CHAT_ID
+
+    bot = _bot_with_chat_info(build_fake_bot(), ChatType(
+        id=CHAT_ID, type="supergroup", title="گروه خصوصی"))
+    await feed(dispatcher, bot, group_message("آیدی گروه", user_id=OWNER_ID))
+    text = "\n".join(c.kwargs.get("text", "") for c in bot.send_message.await_args_list)
+    assert "خصوصی" in text
+
+
+@pytest.mark.asyncio
+async def test_chat_id_looks_up_a_channel_by_username(dispatcher):
+    """«آیدی گروه @x» resolves another public chat, channels included."""
+    from aiogram.types import Chat as ChatType
+    from .test_integration import build_fake_bot, feed, group_message, OWNER_ID
+
+    bot = _bot_with_chat_info(build_fake_bot(), ChatType(
+        id=-1007777777, type="channel", title="کانال نمونه", username="somechannel"))
+    await feed(dispatcher, bot,
+               group_message("آیدی گروه @somechannel", user_id=OWNER_ID))
+    text = "\n".join(c.kwargs.get("text", "") for c in bot.send_message.await_args_list)
+    assert "کانال" in text and "@somechannel" in text
+
+
+@pytest.mark.asyncio
+async def test_chat_id_accepts_a_numeric_chat_id(dispatcher):
+    """A negative chat id is accepted as an argument."""
+    from aiogram.types import Chat as ChatType
+    from .test_integration import build_fake_bot, feed, group_message, OWNER_ID
+
+    bot = _bot_with_chat_info(build_fake_bot(), ChatType(
+        id=-100555666777, type="supergroup", title="دیگری"))
+    await feed(dispatcher, bot,
+               group_message("آیدی گروه -100555666777", user_id=OWNER_ID))
+    assert bot.get_chat.await_count >= 1
+
+
+def test_chat_id_ignores_ordinary_sentences():
+    """«آیدی گروه چنده» is conversation, not a command with an argument."""
+    from app.handlers import build_routers
+    from app.handlers.registry import registry
+
+    build_routers()
+    for phrase in ("آیدی گروه چنده", "آیدی گروه رو کی پاک کرد", "ایدی گروه مال کیه"):
+        assert registry.match(phrase) is None, phrase
