@@ -458,3 +458,94 @@ async def test_rule_view_exposes_the_custom_response_fields(session):
     for field in ("replies", "response_file_id", "response_caption", "response_buttons"):
         assert hasattr(rule, field), field
     assert rule.response_text == "علیک سلام"
+
+
+# --------------------------------------------------------------------------- #
+# Channel (sender chat) blocking
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_ban_channel_blocks_the_sender_chat(dispatcher, monkeypatch):
+    """«بن کانال» on a channel message must call banChatSenderChat."""
+    from aiogram.types import Chat as ChatType
+    from tests.test_integration import build_fake_bot, feed, group_message, OWNER_ID
+
+    bot = build_fake_bot()
+    chan = group_message("تبلیغ", user_id=2000, sender_chat=ChatType(
+        id=-1009999999, type="channel", title="کانال اسپم"))
+    await feed(dispatcher, bot,
+               group_message("بن کانال", user_id=OWNER_ID, reply_to=chan))
+    assert bot.ban_chat_sender_chat.await_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_ban_channel_rejects_a_plain_user_message(dispatcher):
+    """Replying to a normal user message must NOT touch any channel."""
+    from tests.test_integration import build_fake_bot, feed, group_message, OWNER_ID
+
+    bot = build_fake_bot()
+    await feed(dispatcher, bot, group_message(
+        "بن کانال", user_id=OWNER_ID,
+        reply_to=group_message("سلام", user_id=2000)))
+    assert bot.ban_chat_sender_chat.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_plain_ban_on_channel_message_blocks_the_channel(dispatcher):
+    """A plain «بن» on a channel message falls back to blocking the channel."""
+    from aiogram.types import Chat as ChatType
+    from tests.test_integration import build_fake_bot, feed, group_message, OWNER_ID
+
+    bot = build_fake_bot()
+    chan = group_message("تبلیغ", user_id=2000, sender_chat=ChatType(
+        id=-1009999999, type="channel", title="کانال اسپم"))
+    await feed(dispatcher, bot,
+               group_message("بن", user_id=OWNER_ID, reply_to=chan))
+    assert bot.ban_chat_sender_chat.await_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_group_cannot_ban_its_own_linked_channel(dispatcher):
+    """Blocking the group's own chat id must be refused outright."""
+    from aiogram.types import Chat as ChatType
+    from tests.test_integration import (CHAT_ID, build_fake_bot, feed,
+                                        group_message, OWNER_ID)
+
+    bot = build_fake_bot()
+    own = group_message("x", user_id=2000,
+                        sender_chat=ChatType(id=CHAT_ID, type="channel", title="خودش"))
+    await feed(dispatcher, bot,
+               group_message("بن کانال", user_id=OWNER_ID, reply_to=own))
+    assert bot.ban_chat_sender_chat.await_count == 0
+
+
+# --------------------------------------------------------------------------- #
+# Group approval gate (opt-in)
+# --------------------------------------------------------------------------- #
+def test_approval_gate_is_off_by_default():
+    """The bot stays public unless the operator opts in."""
+    from app.config import Settings
+
+    assert Settings().require_group_approval is False
+
+
+def test_approval_keyboard_carries_the_chat_id():
+    from app.handlers.approval import approval_keyboard
+
+    kb = approval_keyboard(-1001234567890)
+    data = "".join(b.callback_data for row in kb.inline_keyboard for b in row)
+    assert "-1001234567890" in data
+    assert ":yes" in data and ":no" in data
+
+
+def test_update_chat_extraction_handles_updates_and_messages():
+    """The gate must find the chat on an Update as well as on a Message."""
+    from aiogram.types import Chat as ChatType, Message, Update
+    from app.middlewares import _update_chat
+
+    chat = ChatType(id=-100555, type="supergroup", title="t")
+    msg = Message(message_id=1, date=0, chat=chat,
+                  from_user=None, text="hi")
+    assert _update_chat(msg) is chat
+    assert _update_chat(Update(update_id=1, message=msg)) is chat
+    assert _update_chat(Update(update_id=1, edited_message=msg)) is chat
+    assert _update_chat(Update(update_id=1)) is None

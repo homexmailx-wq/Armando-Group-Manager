@@ -10,6 +10,7 @@ from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message, TelegramObject
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..core.errors import safe_send
 from ..core.ratelimit import callback_limiter
 from ..db.base import get_sessionmaker
 
@@ -109,3 +110,84 @@ class ChatTrackingMiddleware(BaseMiddleware):
                 except Exception as exc:  # noqa: BLE001
                     logger.debug("chat tracking failed: %s", exc)
         return await handler(event, data)
+
+
+def _update_chat(event: Any) -> Any:
+    """Return the chat an update belongs to, or ``None``.
+
+    An *update*-level middleware receives an :class:`Update`, not a Message, so
+    the chat has to be dug out of whichever field carries it.
+    """
+    chat = getattr(event, "chat", None)
+    if chat is not None:
+        return chat
+    for field in ("message", "edited_message", "channel_post", "my_chat_member",
+                  "chat_member", "chat_join_request", "callback_query"):
+        part = getattr(event, field, None)
+        if part is None:
+            continue
+        chat = getattr(part, "chat", None)
+        if chat is None:
+            inner = getattr(part, "message", None)
+            chat = getattr(inner, "chat", None) if inner is not None else None
+        if chat is not None:
+            return chat
+    return None
+
+
+class GroupApprovalMiddleware(BaseMiddleware):
+    """Ignore groups the bot owner has not whitelisted yet.
+
+    Only active when ``REQUIRE_GROUP_APPROVAL=true``; otherwise this is a
+    no-op and the bot keeps behaving like the public multi-tenant bot it is.
+    """
+
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: dict[str, Any],
+    ) -> Any:
+        from ..config import settings as app_settings
+
+        if not app_settings.require_group_approval:
+            return await handler(event, data)
+
+        chat = _update_chat(event)
+        if chat is None or chat.type not in {"group", "supergroup"}:
+            return await handler(event, data)  # private chats are never gated
+
+        # Update-level middlewares run before the session middleware, so a
+        # short-lived session is borrowed when none is available yet.
+        session: AsyncSession | None = data.get("session")
+        own_session = None
+        if session is None:
+            try:
+                own_session = get_sessionmaker()()
+                session = own_session
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("approval gate could not open a session: %s", exc)
+                return await handler(event, data)
+
+        try:
+            from ..db.models import Chat
+
+            row = await session.get(Chat, chat.id)
+            if row is not None and row.is_approved:
+                return await handler(event, data)
+        except Exception as exc:  # noqa: BLE001 - never break the bot for a gate
+            logger.debug("approval check failed: %s", exc)
+            return await handler(event, data)
+        finally:
+            if own_session is not None:
+                await own_session.close()
+
+        # Not whitelisted yet: remind the group once, then stay silent.
+        bot = data.get("bot")
+        if bot is not None and getattr(event, "message", None) is not None:
+            await safe_send(bot, chat.id,
+                            "⏳ <b>ربات هنوز فعال نشده است.</b>\n\n"
+                            "درخواست فعال‌سازی برای مالک ربات ارسال شد؛ "
+                            "پس از تایید، ربات در این گروه کار خواهد کرد.",
+                            parse_mode="HTML")
+        return None

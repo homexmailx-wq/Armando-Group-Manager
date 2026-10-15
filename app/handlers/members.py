@@ -294,6 +294,9 @@ async def on_my_chat_member(update: ChatMemberUpdated, session: AsyncSession, bo
         chat.bot_is_admin = True
         chat.is_active = True
         logger.info("bot promoted in chat %s", update.chat.id)
+        from .approval import request_approval
+
+        await request_approval(bot, session, update.chat)
     elif new_status in {"left", "kicked"}:
         chat.bot_is_admin = False
         chat.is_active = False
