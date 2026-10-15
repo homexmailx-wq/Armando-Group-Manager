@@ -195,11 +195,21 @@ async def cmd_approve_group(bot: Bot, session: AsyncSession, chat_id: int,
 
 
 # --------------------------------------------------------------------------- #
+def _owner_only_message() -> str:
+    """Why nothing happened - silent returns leave the admin confused."""
+    if not app_settings.owner_id:
+        return ("⛔️ این دستور فقط برای مالک ربات است، اما متغیر "
+                "<code>OWNER_ID</code> تنظیم نشده است.\n"
+                "مقدار آن را برابر شناسه عددی خودتان قرار دهید.")
+    return "⛔️ این دستور فقط برای مالک ربات است (ادمین‌ها و سازندهٔ گروه نه)."
+
+
 @command("تایید گروه", "فعال کردن گروه", role="founder", category="owner",
          description="تایید دسترسی یک گروه (مالک ربات)",
          usage="تایید گروه -1001234567890", allow_in_private=True)
 async def cmd_approve(ctx: CommandContext) -> None:
     if not ctx.actor.is_bot_owner:
+        await ctx.reply(_owner_only_message())
         return
     target = _parse_chat_id(ctx.arg_text)
     if target is None:
@@ -213,6 +223,7 @@ async def cmd_approve(ctx: CommandContext) -> None:
          usage="رد گروه -1001234567890", allow_in_private=True)
 async def cmd_reject(ctx: CommandContext) -> None:
     if not ctx.actor.is_bot_owner:
+        await ctx.reply(_owner_only_message())
         return
     target = _parse_chat_id(ctx.arg_text)
     if target is None:
@@ -225,6 +236,7 @@ async def cmd_reject(ctx: CommandContext) -> None:
          description="نمایش وضعیت دروازهٔ تایید گروه‌ها", allow_in_private=True)
 async def cmd_approval_status(ctx: CommandContext) -> None:
     if not ctx.actor.is_bot_owner:
+        await ctx.reply(_owner_only_message())
         return
     state = "🟢 روشن" if app_settings.require_group_approval else "🔴 خاموش"
     await ctx.reply(
