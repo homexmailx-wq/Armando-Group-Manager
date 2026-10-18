@@ -9,7 +9,7 @@ from pathlib import Path
 from aiogram import Bot
 from sqlalchemy import select
 from telethon import TelegramClient, functions, types, utils
-from telethon.errors import FloodWaitError
+from telethon.errors import ChannelInvalidError, FloodWaitError
 
 from .. import config
 from ..core.normalization import to_persian_digits
@@ -94,33 +94,83 @@ class DeletedAccountScanner:
                 await self._ban_and_report(chat_id, deleted_ids, incomplete=incomplete)
             await asyncio.sleep(0.05)
 
+    async def _resolve_input_channel(self, channel_id: int, *, refresh: bool = False):
+        """Resolve this session's channel access hash before participant calls.
+
+        Telethon's normal resolver first consults its entity/session cache and,
+        for a bot, may use channels.getChannels with a zero hash to obtain a
+        usable Channel entity. A zero hash is never sent to getParticipants.
+        """
+        if refresh:
+            # A cached hash can become unusable after a channel migration or
+            # access change. Re-bootstrap it through the bot-supported lookup.
+            result = await self.client(functions.channels.GetChannelsRequest(
+                id=[types.InputChannel(channel_id=channel_id, access_hash=0)]
+            ))
+            entity = next((item for item in getattr(result, "chats", [])
+                           if getattr(item, "id", None) == channel_id
+                           and getattr(item, "access_hash", None) is not None), None)
+            if entity is None:
+                raise ValueError("کانال از نشست MTProto قابل resolve نیست")
+            return types.InputChannel(channel_id=channel_id,
+                                      access_hash=int(entity.access_hash))
+
+        input_peer = await self.client.get_input_entity(types.PeerChannel(channel_id))
+        return utils.get_input_channel(input_peer)
+
+    def _participants_request(self, input_channel, offset: int):
+        return functions.channels.GetParticipantsRequest(
+            channel=input_channel,
+            filter=types.ChannelParticipantsSearch(""),
+            offset=offset,
+            limit=_PAGE_SIZE,
+            hash=0,
+        )
+
     async def _deleted_user_ids(self, chat_id: int, chat_type: str) -> tuple[list[int], bool]:
-        if chat_type == "group":
-            real_id, _peer_type = utils.resolve_id(chat_id)
-            result = await self.client(functions.messages.GetFullChatRequest(chat_id=real_id))
+        # The marked Bot API ID is authoritative for choosing Chat vs Channel.
+        # Chat.type can be stale (for example, a group migrated to a supergroup).
+        peer_id, peer_class = utils.resolve_id(chat_id)
+        if peer_class is types.PeerChat:
+            result = await self.client(
+                functions.messages.GetFullChatRequest(chat_id=peer_id)
+            )
             ids = sorted({int(user.id) for user in getattr(result, "users", [])
                           if is_deleted_mtproto_user(user)})
             return ids, False
 
-        channel_id, _peer_type = utils.resolve_id(chat_id)
-        input_channel = types.InputChannel(channel_id=channel_id, access_hash=0)
+        if peer_class is not types.PeerChannel:
+            raise ValueError(f"شناسهٔ چت {chat_id} از نوع گروه یا کانال نیست")
+
+        input_channel = await self._resolve_input_channel(peer_id)
         offset = 0
         deleted: set[int] = set()
         incomplete = False
+        refreshed_hash = False
+
         for page in range(_MAX_CHANNEL_PAGES):
             try:
-                result = await self.client(functions.channels.GetParticipantsRequest(
-                    channel=input_channel,
-                    filter=types.ChannelParticipantsSearch(""),
-                    offset=offset,
-                    limit=_PAGE_SIZE,
-                    hash=0,
-                ))
+                result = await self.client(self._participants_request(input_channel, offset))
             except FloodWaitError:
                 # Keep useful results from earlier pages and report that this
                 # scan ended early rather than discarding them.
                 incomplete = True
                 break
+            except ChannelInvalidError:
+                if refreshed_hash:
+                    raise
+                # Retry once after explicitly fetching a current entity/access
+                # hash through getChannels; never retry with hash=0 here.
+                try:
+                    input_channel = await self._resolve_input_channel(peer_id, refresh=True)
+                    refreshed_hash = True
+                    result = await self.client(
+                        self._participants_request(input_channel, offset)
+                    )
+                except FloodWaitError:
+                    incomplete = True
+                    break
+
             for user in getattr(result, "users", []):
                 if is_deleted_mtproto_user(user):
                     deleted.add(int(user.id))

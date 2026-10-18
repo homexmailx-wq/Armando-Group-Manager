@@ -1,15 +1,20 @@
-"""Download public Instagram post and reel media without account cookies."""
+"""Download public Instagram post/reel media using open-source extractors."""
 
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import logging
 import os
 import re
+import stat
 import sys
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from aiogram import Bot
 from aiogram.types import (FSInputFile, InputMediaDocument, InputMediaPhoto,
@@ -22,12 +27,28 @@ _PUBLIC_POST_RE = re.compile(
     r"[A-Za-z0-9_-]+/?(?:\?[^\s]*)?$",
     re.IGNORECASE,
 )
-_MEDIA_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".mp4", ".m4v", ".mov"}
+_MEDIA_EXTENSIONS = {
+    ".jpg", ".jpeg", ".png", ".webp", ".mp4", ".m4v", ".mov", ".webm", ".mkv",
+}
 _MAX_FILES = 10
 _MAX_TOTAL_BYTES = 48 * 1024 * 1024
 _DOWNLOAD_TIMEOUT = 55
 _DOWNLOAD_COOLDOWN = 10.0
 _last_download: dict[int, float] = {}
+_ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+_COOKIE_VALUE_RE = re.compile(
+    r"(?i)\b(sessionid|csrftoken|ds_user_id|mid|ig_did)\s*[:=]\s*([^;\s,]+)"
+)
+
+
+@dataclass(frozen=True)
+class _ExtractorAttempt:
+    extractor: str
+    return_code: int | None
+    category: str
+    detail: str
+    files: tuple[Path, ...]
 
 
 def extract_public_instagram_url(text: str) -> str | None:
@@ -52,6 +73,217 @@ def _input_media(path: Path, caption: str = ""):
     if ext == ".mp4":
         return InputMediaVideo(media=media, caption=caption or None, parse_mode=None)
     return InputMediaDocument(media=media, caption=caption or None, parse_mode=None)
+
+
+def _extractor_order(url: str) -> tuple[str, str]:
+    """Prefer the video-focused extractor for Reels; gallery-dl for posts."""
+    path = urlsplit(url).path.lower()
+    if path.startswith(("/reel/", "/reels/", "/tv/")):
+        return "yt-dlp", "gallery-dl"
+    return "gallery-dl", "yt-dlp"
+
+
+def _classify_failure(detail: str, *, timed_out: bool = False) -> str:
+    if timed_out:
+        return "timeout"
+    value = (detail or "").lower()
+    if any(token in value for token in ("429", "too many requests", "rate limit", "rate-limit")):
+        return "rate-limited"
+    if any(token in value for token in ("private", "not found", "404", "no results", "unavailable")):
+        return "unavailable"
+    if any(token in value for token in (
+        "login", "logged-in", "logged in", "authentication", "unauthorized",
+        "401", "403", "checkpoint", "cookie", "empty media response",
+    )):
+        return "login-required"
+    return "extractor-error"
+
+
+def _safe_diagnostic(raw: bytes | str | None, *, fallback: str = "") -> str:
+    """Keep useful extractor detail while removing URLs and session-like values."""
+    if isinstance(raw, bytes):
+        text = raw.decode("utf-8", errors="replace")
+    else:
+        text = raw or ""
+    text = _ANSI_RE.sub("", text)
+    text = _COOKIE_VALUE_RE.sub(lambda match: f"{match.group(1)}=<redacted>", text)
+    text = _URL_RE.sub("[پیوند]", text)
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    detail = " ".join(lines[-3:]) if lines else fallback
+    return detail[:500]
+
+
+def _cookie_file_bytes() -> bytes | None:
+    """Decode the operator's optional Netscape cookie file without logging it."""
+    from .. import config
+
+    encoded = config.settings.instagram_cookies_b64
+    if not encoded:
+        return None
+    try:
+        compact = "".join(encoded.split())
+        data = base64.b64decode(compact, validate=True)
+    except (binascii.Error, ValueError):
+        logger.warning("secret کوکی اینستاگرام Base64 معتبر نیست؛ حالت بی‌کوکی ادامه می‌یابد.")
+        return None
+    if not data.strip():
+        return None
+    first_lines = data.splitlines()[:3]
+    if not any(line.strip() in {b"# Netscape HTTP Cookie File", b"# HTTP Cookie File"}
+               for line in first_lines):
+        logger.warning("فایل کوکی اینستاگرام باید با قالب Netscape باشد؛ حالت بی‌کوکی ادامه می‌یابد.")
+        return None
+    return data
+
+
+def _is_owner_private_chat(message: Message) -> bool:
+    """Never expose an operator-owned Instagram session to public bot users."""
+    from .. import config
+
+    actor = message.from_user
+    owner_id = config.settings.owner_id
+    return bool(
+        owner_id
+        and actor is not None
+        and actor.id == owner_id
+        and message.chat.type == "private"
+    )
+
+
+def _write_cookie_file(root: Path, data: bytes) -> Path:
+    path = root / "instagram-cookies.txt"
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, stat.S_IRUSR | stat.S_IWUSR)
+    with os.fdopen(descriptor, "wb") as cookie_file:
+        cookie_file.write(data)
+    return path
+
+
+def _download_env(root: Path) -> dict[str, str]:
+    # Keep the subprocess isolated: no inherited API tokens, proxy credentials,
+    # browser profiles, user configs, or persistent cache are passed through.
+    return {
+        "HOME": str(root),
+        "XDG_CONFIG_HOME": str(root),
+        "XDG_CACHE_HOME": str(root),
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "LANG": "C.UTF-8",
+        "PYTHONUTF8": "1",
+    }
+
+
+def _build_command(extractor: str, output_dir: Path, url: str,
+                   cookies_path: Path | None = None) -> list[str]:
+    if extractor == "gallery-dl":
+        command = [
+            sys.executable, "-m", "gallery_dl", "--quiet", "--config-ignore",
+            "--destination", str(output_dir),
+        ]
+    elif extractor == "yt-dlp":
+        command = [
+            sys.executable, "-m", "yt_dlp", "--ignore-config", "--quiet",
+            "--no-warnings", "--no-progress", "--no-playlist",
+            "--merge-output-format", "mp4",
+            "--output", str(output_dir / "%(id)s.%(ext)s"),
+        ]
+    else:
+        raise ValueError(f"unsupported Instagram extractor: {extractor}")
+
+    if cookies_path is not None:
+        command.extend(["--cookies", str(cookies_path)])
+    command.append(url)
+    return command
+
+
+async def _run_extractor(extractor: str, url: str, output_dir: Path,
+                         env: dict[str, str],
+                         cookies_path: Path | None = None) -> _ExtractorAttempt:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    command = _build_command(extractor, output_dir, url, cookies_path)
+    process = await asyncio.create_subprocess_exec(
+        *command,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=env,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            process.communicate(), timeout=_DOWNLOAD_TIMEOUT)
+    except asyncio.TimeoutError:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+        stdout, stderr = await process.communicate()
+        detail = _safe_diagnostic(stderr or stdout, fallback="مهلت دریافت به پایان رسید")
+        return _ExtractorAttempt(extractor, process.returncode, "timeout", detail, ())
+
+    files = tuple(_media_file_list(output_dir))
+    detail = _safe_diagnostic(stderr or stdout)
+    if process.returncode == 0 and files:
+        return _ExtractorAttempt(extractor, process.returncode, "ok", detail, files)
+    if process.returncode == 0 and not detail:
+        detail = "استخراج‌گر بدون فایل رسانه پایان یافت"
+    category = _classify_failure(detail)
+    return _ExtractorAttempt(extractor, process.returncode, category, detail, files)
+
+
+def _log_attempt(attempt: _ExtractorAttempt) -> None:
+    logger.warning(
+        "استخراج‌گر اینستاگرام %s ناموفق بود؛ کد=%s، علت=%s، جزئیات=%s",
+        attempt.extractor,
+        attempt.return_code,
+        attempt.category,
+        attempt.detail or "بدون توضیح از استخراج‌گر",
+    )
+
+
+async def _download_instagram_media(
+    url: str,
+    root: Path,
+    *,
+    allow_operator_cookies: bool,
+) -> tuple[list[Path], str, list[_ExtractorAttempt]]:
+    """Try a video/gallery extractor pair; retry once with owner cookies if gated."""
+    env = _download_env(root)
+    order = _extractor_order(url)
+    attempts: list[_ExtractorAttempt] = []
+    cookie_data = _cookie_file_bytes() if allow_operator_cookies else None
+
+    for extractor in order:
+        attempt = await _run_extractor(
+            extractor, url, root / extractor / "anonymous", env)
+        attempts.append(attempt)
+        if attempt.category == "ok":
+            return list(attempt.files), "ok", attempts
+        _log_attempt(attempt)
+        # Another request will not help a hard rate limit or a clearly missing
+        # / private post; stop rather than increasing Instagram's throttle.
+        if attempt.category in {"rate-limited", "unavailable"}:
+            break
+
+    if (
+        cookie_data is not None
+        and any(attempt.category == "login-required" for attempt in attempts)
+        and not any(attempt.category in {"rate-limited", "unavailable"} for attempt in attempts)
+    ):
+        cookie_path = _write_cookie_file(root, cookie_data)
+        extractor = order[0]
+        attempt = await _run_extractor(
+            extractor, url, root / extractor / "owner-session", env, cookie_path)
+        attempts.append(attempt)
+        if attempt.category == "ok":
+            return list(attempt.files), "ok", attempts
+        _log_attempt(attempt)
+
+    if attempts:
+        # Prefer a clear auth/rate-limit explanation over a generic extractor error.
+        categories = {attempt.category for attempt in attempts}
+        for category in ("rate-limited", "login-required", "unavailable", "timeout"):
+            if category in categories:
+                return [], category, attempts
+        return [], attempts[-1].category, attempts
+    return [], "extractor-error", attempts
 
 
 async def _send_notice(bot: Bot, message: Message, text: str) -> None:
@@ -86,48 +318,32 @@ async def handle_instagram_message(message: Message, bot: Bot) -> bool:
     try:
         with tempfile.TemporaryDirectory(prefix="armando-instagram-") as tmp:
             root = Path(tmp)
-            # Pass only non-secret runtime essentials. The isolated temporary
-            # home prevents gallery-dl from reading stored cookies/configuration.
-            env = {
-                "HOME": tmp,
-                "XDG_CONFIG_HOME": tmp,
-                "XDG_CACHE_HOME": tmp,
-                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-                "LANG": "C.UTF-8",
-                "PYTHONUTF8": "1",
-            }
-            process = await asyncio.create_subprocess_exec(
-                sys.executable, "-m", "gallery_dl", "--quiet", "--config-ignore",
-                "--destination", tmp, url,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-                env=env,
-            )
-            try:
-                await asyncio.wait_for(process.communicate(), timeout=_DOWNLOAD_TIMEOUT)
-            except asyncio.TimeoutError:
-                process.kill()
-                await process.communicate()
-                await _send_notice(
-                    bot, message,
-                    "⏱ دریافت رسانه بیش از حد طول کشید. لطفاً بعداً دوباره امتحان کنید.")
-                return True
-
-            if process.returncode != 0:
-                logger.info("دریافت لینک عمومی اینستاگرام با کد %s پایان یافت.",
-                            process.returncode)
-                await _send_notice(
-                    bot, message,
-                    "❌ دریافت ناموفق بود. فقط پیوند مستقیمِ پست یا ریلِ عمومی پشتیبانی می‌شود؛ "
-                    "محتوای خصوصی، حذف‌شده، محدود یا نیازمند ورود قابل دریافت نیست.")
-                return True
-
-            files = _media_file_list(root)
+            files, failure, _attempts = await _download_instagram_media(
+                url, root, allow_operator_cookies=_is_owner_private_chat(message))
             if not files:
-                await _send_notice(
-                    bot, message,
-                    "❌ رسانه‌ای پیدا نشد؛ ممکن است پست خصوصی، حذف‌شده یا برای دریافت محدود باشد.")
+                if failure == "rate-limited":
+                    notice = (
+                        "⏳ اینستاگرام دسترسی سرور را موقتاً محدود کرده است. "
+                        "کمی بعد دوباره امتحان کنید؛ کوکی هم محدودیت نرخ را تضمینی رفع نمی‌کند."
+                    )
+                elif failure == "login-required":
+                    notice = (
+                        "🔒 اینستاگرام برای این پیوند ورود یا نشست معتبر خواسته است. "
+                        "دریافت بی‌کوکیِ لینک‌های عمومی تضمین‌شده نیست."
+                    )
+                elif failure == "unavailable":
+                    notice = (
+                        "❌ پیوند خصوصی، حذف‌شده یا در دسترس نیست؛ فقط رسانه‌ای که "
+                        "برای این ربات قابل مشاهده باشد دریافت می‌شود."
+                    )
+                elif failure == "timeout":
+                    notice = "⏱ دریافت رسانه بیش از حد طول کشید. لطفاً بعداً دوباره امتحان کنید."
+                else:
+                    notice = (
+                        "❌ دریافت ناموفق بود. پیوند مستقیمِ پست یا ریل را بررسی کنید "
+                        "و بعداً دوباره امتحان کنید."
+                    )
+                await _send_notice(bot, message, notice)
                 return True
 
             total_size = sum(path.stat().st_size for path in files)

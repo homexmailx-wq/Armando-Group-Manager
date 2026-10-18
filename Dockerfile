@@ -8,7 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends tzdata curl \
+ && apt-get install -y --no-install-recommends tzdata curl ffmpeg \
  && rm -rf /var/lib/apt/lists/*
 
 # Asia/Tehran is the bot default timezone
@@ -22,9 +22,9 @@ COPY . .
 
 RUN mkdir -p /app/data /app/logs && useradd -m -u 10001 armando \
  && chown -R armando:armando /app
+USER armando
 
-
-
+VOLUME ["/app/data"]
 
 EXPOSE 8080
 
