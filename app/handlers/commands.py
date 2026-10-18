@@ -81,7 +81,7 @@ class IsPersianCommand:
         raw = message.text or message.caption or ""
         if not raw or raw.startswith("/"):
             return False
-        match = registry.match(raw)
+        match = registry.match(raw, has_reply=message.reply_to_message is not None)
         if match is None:
             return False
         return {"command_match": match}

@@ -125,6 +125,8 @@ class ChatMemberState(Base, TimestampMixin):
     bot_role: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     tag: Mapped[str | None] = mapped_column(String(64), nullable=True)  # editable member tag
+    mention_opt_out: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False, server_default=FALSE)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     captcha_passed: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, server_default=TRUE)
@@ -648,6 +650,68 @@ class AuditLog(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class BotSettings(Base, TimestampMixin):
+    """Small set of persistent bot-wide switches (currently broadcast)."""
+
+    __tablename__ = "bot_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    broadcast_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, nullable=False, server_default=TRUE)
+    updated_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+
+class BroadcastDraft(Base):
+    """Owner-reviewed broadcast source and destination selection."""
+
+    __tablename__ = "broadcast_drafts"
+    __table_args__ = (Index("ix_broadcast_drafts_owner_stage", "owner_id", "stage"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    source_message_ids: Mapped[list[int] | None] = mapped_column(JSON, nullable=True)
+    text_body: Mapped[str | None] = mapped_column(Text, nullable=True)
+    selected_chat_ids: Mapped[list[int]] = mapped_column(JSON, default=list, nullable=False)
+    stage: Mapped[str] = mapped_column(String(16), default="select", nullable=False)
+    page: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow,
+                                                 onupdate=datetime.utcnow, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class BotRootGrant(Base):
+    """A bot-owner delegation scoped to one chat and one Telegram admin."""
+
+    __tablename__ = "bot_root_grants"
+    __table_args__ = (
+        UniqueConstraint("chat_id", "user_id", name="uq_bot_root_chat_user"),
+        Index("ix_bot_root_user", "user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("chats.id", ondelete="CASCADE"),
+                                         nullable=False)
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id", ondelete="CASCADE"),
+                                         nullable=False)
+    granted_by: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class RootGrantDraft(Base):
+    """Short-lived private selection flow for assigning root access to a chat."""
+
+    __tablename__ = "root_grant_drafts"
+    __table_args__ = (Index("ix_root_grant_drafts_owner", "owner_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    target_ref: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
 class SchemaVersion(Base):
     __tablename__ = "schema_version"
 
@@ -662,5 +726,6 @@ ALL_MODELS: tuple[type[Base], ...] = (
     ModerationAction, Lock, FilterRule, Note, PersonalCommand, MagicTrigger,
     ReactionRule, CaptchaSession, Report, ScheduledMessage, Federation,
     FederationAdmin, FederationMember, Connection, UserActivity,
-    GroupStatSnapshot, AuditLog, BanRecord, SchemaVersion,
+    GroupStatSnapshot, AuditLog, BanRecord, BotSettings, BroadcastDraft,
+    BotRootGrant, RootGrantDraft, SchemaVersion,
 )

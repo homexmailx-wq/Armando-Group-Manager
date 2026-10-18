@@ -20,7 +20,7 @@ logger = logging.getLogger("armando.handlers.mention_all")
 
 @command("تگ همه", "منشن همه", "صدا زدن همه", "فراخوانی همه", "تگ اعضا", "منشن اعضا",
          "@all", role="admin", category="members", group_only=True,
-         description="منشن کردن همهٔ اعضای گروه", usage="تگ همه")
+         description="منشن اعضای شناخته‌شده و قابل‌تگ گروه", usage="تگ همه")
 async def cmd_mention_all(ctx: CommandContext) -> None:
     if not await require(ctx, role="admin"):
         return
@@ -35,7 +35,8 @@ async def cmd_mention_all(ctx: CommandContext) -> None:
                                             caller=caller_pair)
     if not members:
         await ctx.reply(
-            "📣 هنوز عضوی در این گروه ثبت نشده است.\n"
+            "📣 عضوی برای تگ‌کردن پیدا نشد؛ ممکن است هنوز عضوی ثبت نشده باشد یا "
+            "همهٔ اعضای شناخته‌شده از تگ همه مستثنا شده باشند.\n"
             "ربات فقط اعضایی را می‌شناسد که بعد از حضورش در گروه پیام فرستاده، "
             "ری‌اکت زده یا وارد شده باشند.")
         return

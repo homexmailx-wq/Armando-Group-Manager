@@ -69,6 +69,15 @@ async def _migration_6(engine: AsyncEngine) -> None:
 
 MIGRATIONS[6] = _migration_6
 
+
+async def _migration_7(engine: AsyncEngine) -> None:
+    """Per-chat opt-out from the mention-all roster."""
+    await add_column(engine, "chat_members", "mention_opt_out",
+                     "BOOLEAN NOT NULL DEFAULT FALSE")
+
+
+MIGRATIONS[7] = _migration_7
+
 CURRENT_VERSION = max(MIGRATIONS) if MIGRATIONS else 0
 
 

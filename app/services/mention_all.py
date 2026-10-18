@@ -20,9 +20,11 @@ import logging
 
 from aiogram.types import MessageEntity
 from aiogram.types import User as TelegramUser
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.normalization import to_persian_digits
+from ..db.models import ChatMemberState
 from . import roster
 
 logger = logging.getLogger("armando.mentionall")
@@ -71,9 +73,15 @@ async def collect(session: AsyncSession, chat_id: int, *,
     ``bot`` lets the roster also read the real administrator list.
     """
     members = await roster.known_members(session, chat_id, bot=bot, limit=limit)
+    result = await session.execute(
+        select(ChatMemberState.user_id).where(
+            ChatMemberState.chat_id == chat_id,
+            ChatMemberState.mention_opt_out.is_(True)))
+    excluded = {int(row[0]) for row in result.all()}
+    members = [(uid, name) for uid, name in members if int(uid) not in excluded]
     if caller is not None:
         user_id, name = int(caller[0]), caller[1]
-        if user_id > 0 and not any(uid == user_id for uid, _ in members):
+        if user_id > 0 and user_id not in excluded and not any(uid == user_id for uid, _ in members):
             members.insert(0, (user_id, display_name(name, None, None)))
     return members
 

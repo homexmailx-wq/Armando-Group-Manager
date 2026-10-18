@@ -118,7 +118,8 @@ async def on_group_message(message: Message, session: AsyncSession, bot: Bot) ->
     # ------------------------------------------------------------------ AFK
     if settings.get("afk_enabled", True):
         was_afk, _, _ = await afk_service.get_afk(session, user.id)
-        if was_afk and text and registry.match(text) is None:
+        if was_afk and text and registry.match(
+                text, has_reply=message.reply_to_message is not None) is None:
             await afk_service.clear_afk(session, user.id)
             await _notify(bot, chat.id, "👋 به جمع برگشتید.", reply_to=message.message_id)
         if message.reply_to_message and message.reply_to_message.from_user:

@@ -34,8 +34,9 @@ from ..services import (
     purge as purge_service,
     tags as tag_service,
 )
-from ..services.chat_state import (get_settings, invalidate_member, invalidate_settings,
-                                   set_bot_role, set_trust)
+from ..services.chat_state import (get_member_state, get_settings, invalidate_member,
+                                   invalidate_settings, set_bot_role, set_trust)
+from ..services.permissions import is_anonymous_sender
 from ..services.roles import can_manage_role
 from .common import (CommandContext, display_name, guard_target, require, undo_keyboard,
                      user_html)
@@ -213,6 +214,73 @@ async def cmd_del_tag(ctx: CommandContext) -> None:
     await tag_service.set_tag(ctx.session, ctx.chat_id, target.user_id, None)
     await tag_service.apply_member_tag(ctx.bot, ctx.chat_id, target.user_id, None)
     await ctx.reply(f"🗑 تگ {user_html(target.user_id, target.full_name)} حذف شد.")
+
+
+@command("حذف از تگ", "حذف از تگ خود", role="admin", permission="manage",
+         category="tags", description="استثناکردن خود یا عضو از تگ همه", group_only=True)
+async def cmd_exclude_from_mention_all(ctx: CommandContext) -> None:
+    if not await require(ctx, role="admin", permission="manage"):
+        return
+    ids: list[int] = []
+    caller = ctx.message.from_user
+    if caller is not None and not is_anonymous_sender(caller):
+        ids.append(ctx.user_id)
+
+    self_only = normalize_text(ctx.command, mode="command") == normalize_text(
+        "حذف از تگ خود", mode="command")
+    if ctx.message.reply_to_message is not None and not self_only:
+        target = await ctx.target()
+        if target.error or not target.user_id:
+            await ctx.reply(target.error or "❌ کاربر هدف مشخص نشد.")
+            return
+        if target.user_id not in ids:
+            ids.append(target.user_id)
+
+    if not ids:
+        await ctx.reply("⚠️ هویت ادمینِ ارسال‌کننده مشخص نیست؛ روی پیام یک عضو ریپلای کنید.")
+        return
+
+    for user_id in ids:
+        state = await get_member_state(ctx.session, ctx.chat_id, user_id, create=True)
+        state.mention_opt_out = True
+        state.updated_at = datetime.utcnow()
+    await ctx.session.flush()
+
+    lines = ["🏷 از این پس اعضای زیر در «تگ همه» منشن نمی‌شوند:"]
+    for user_id in ids:
+        lines.append(f"• {user_html(user_id, await display_name(ctx.session, user_id))}")
+    lines.append("\nبرای بازگردانی، روی پیام عضو ریپلای کنید و بنویسید "
+                 "<code>افزودن به تگ</code>؛ برای خودتان: <code>افزودن به تگ خود</code>.")
+    await ctx.reply("\n".join(lines))
+
+
+@command("افزودن به تگ", "افزودن به تگ خود", role="admin", permission="manage",
+         category="tags", description="بازگرداندن خود یا عضو به تگ همه", group_only=True)
+async def cmd_restore_mention_all(ctx: CommandContext) -> None:
+    if not await require(ctx, role="admin", permission="manage"):
+        return
+    self_only = normalize_text(ctx.command, mode="command") == normalize_text(
+        "افزودن به تگ خود", mode="command")
+    if ctx.message.reply_to_message is not None and not self_only:
+        target = await ctx.target()
+        if target.error or not target.user_id:
+            await ctx.reply(target.error or "❌ کاربر هدف مشخص نشد.")
+            return
+        user_ids = [target.user_id]
+    else:
+        if is_anonymous_sender(ctx.message.from_user):
+            await ctx.reply("⚠️ برای بازگردانی، روی پیام عضو ریپلای کنید.")
+            return
+        user_ids = [ctx.user_id]
+
+    for user_id in user_ids:
+        state = await get_member_state(ctx.session, ctx.chat_id, user_id, create=True)
+        state.mention_opt_out = False
+        state.updated_at = datetime.utcnow()
+    await ctx.session.flush()
+    user_id = user_ids[0]
+    await ctx.reply(f"✅ {user_html(user_id, await display_name(ctx.session, user_id))} "
+                    "دوباره در «تگ همه» منشن می‌شود.")
 
 
 @command("لیست تگ‌ها", "تگ‌ها", role="member", category="tags", description="نمایش تگ اعضا")
@@ -836,7 +904,7 @@ HELP_TOPICS: dict[str, str] = {
     "قیمت": "market", "قوانین": "rules", "آمار": "stats", "پیامها": "messages",
     "پیام‌ها": "messages", "گزارش": "report", "فدراسیون": "federation",
     "اعضا": "members", "یادداشتها": "notes", "یادداشت‌ها": "notes",
-    "مدیران": "staff", "ابزارها": "tools",
+    "مدیران": "staff", "ابزارها": "tools", "مالک": "owner", "مالک ربات": "owner",
 }
 
 
@@ -863,7 +931,7 @@ async def cmd_help(ctx: CommandContext) -> None:
              "• <code>راهنما خوشامد</code>",
              "• <code>راهنما سرگرمی</code>",
              "• <code>راهنما ارز</code>",
-             "• <code>راهنما ابزارها</code>", "",
+             "• <code>راهنما ابزارها</code> • <code>راهنما مالک</code> (ویژه مالک ربات)", "",
              "🎛 برای پنل گرافیکی: <code>پنل</code> یا <code>تنظیمات</code>"]
     await ctx.reply("\n".join(lines))
 
