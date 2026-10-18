@@ -3,6 +3,10 @@
 
 # Telegram framework
 aiogram==3.31.0
+Telethon==1.45.0
+
+# Download public Instagram posts/reels without login cookies
+gallery-dl==1.32.17
 
 # Database: SQLAlchemy 2.x (async) + SQLite driver
 SQLAlchemy==2.0.36

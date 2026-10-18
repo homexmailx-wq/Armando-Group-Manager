@@ -60,6 +60,15 @@ async def _migration_5(engine: AsyncEngine) -> None:
 
 MIGRATIONS[5] = _migration_5
 
+
+async def _migration_6(engine: AsyncEngine) -> None:
+    """Default exemption for messages posted under the group's own identity."""
+    await add_column(engine, "chat_settings", "anonymous_sender_exempt",
+                     "BOOLEAN NOT NULL DEFAULT TRUE")
+
+
+MIGRATIONS[6] = _migration_6
+
 CURRENT_VERSION = max(MIGRATIONS) if MIGRATIONS else 0
 
 

@@ -115,7 +115,6 @@ class ChatMemberState(Base, TimestampMixin):
     message_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False, server_default="0")
     media_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False, server_default="0")
     command_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False, server_default="0")
-    reputation_total: Mapped[int] = mapped_column(Integer, default=0, nullable=False, server_default="0")
 
     joined_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     left_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -141,6 +140,8 @@ class ChatSettings(Base, TimestampMixin):
     )
     language: Mapped[str] = mapped_column(String(8), default="fa", nullable=False)
     timezone: Mapped[str] = mapped_column(String(64), default="Asia/Tehran", nullable=False)
+    anonymous_sender_exempt: Mapped[bool] = mapped_column(
+        Boolean, default=True, nullable=False, server_default="TRUE")
 
     # ------------------------------------------------------------------ warnings
     warn_limit: Mapped[int] = mapped_column(Integer, default=4, nullable=False)
@@ -242,7 +243,6 @@ class ChatSettings(Base, TimestampMixin):
     report_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, server_default=TRUE)
     report_notify_admins: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, server_default=TRUE)
     afk_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, server_default=TRUE)
-    reputation_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, server_default=TRUE)
     games_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, server_default=TRUE)
     market_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, server_default=TRUE)
 
@@ -599,24 +599,6 @@ class Connection(Base):
     last_used_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
 
-class Reputation(Base):
-    __tablename__ = "reputations"
-    __table_args__ = (
-        UniqueConstraint("chat_id", "user_id", name="uq_rep_chat_user"),
-        Index("ix_rep_chat_score", "chat_id", "score"),
-    )
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    positive: Mapped[int] = mapped_column(Integer, default=0, nullable=False, server_default="0")
-    negative: Mapped[int] = mapped_column(Integer, default=0, nullable=False, server_default="0")
-    score: Mapped[int] = mapped_column(Integer, default=0, nullable=False, server_default="0")
-    voters: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow,
-                                                 nullable=False)
-
-
 class UserActivity(Base):
     """Daily activity aggregate used for statistics and inactivity detection."""
 
@@ -679,6 +661,6 @@ ALL_MODELS: tuple[type[Base], ...] = (
     Chat, ChatSettings, User, ChatMemberState, BotRole, TrustedUser, Warning,
     ModerationAction, Lock, FilterRule, Note, PersonalCommand, MagicTrigger,
     ReactionRule, CaptchaSession, Report, ScheduledMessage, Federation,
-    FederationAdmin, FederationMember, Connection, Reputation, UserActivity,
+    FederationAdmin, FederationMember, Connection, UserActivity,
     GroupStatSnapshot, AuditLog, BanRecord, SchemaVersion,
 )

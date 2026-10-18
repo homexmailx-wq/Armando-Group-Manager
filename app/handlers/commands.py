@@ -220,6 +220,14 @@ async def on_private_text(message: Message, session: AsyncSession, bot: Bot) -> 
     raw = (message.text or "").strip()
     if not raw or raw.startswith("/"):
         return
+    from ..services.instagram import handle_instagram_message
+
+    if await handle_instagram_message(message, bot):
+        return
+    from ..services.ai_chat import handle_ai_message
+
+    if await handle_ai_message(message, bot):
+        return
     connected = await connection_service.get_active(session, message.from_user.id)
     if connected:
         await safe_send(

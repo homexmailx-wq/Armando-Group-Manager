@@ -968,10 +968,9 @@ def _panel_profile(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
     if profile.get("tag"):
         lines.append(f"🏷 تگ: <code>{profile['tag']}</code>")
     lines.append(f"📨 پیام‌های من: {to_persian_digits(str(profile.get('messages', 0)))}")
-    lines.append(f"⭐️ امتیاز من: {to_persian_digits(str(profile.get('score', 0)))}")
     lines.append(f"⚠️ اخطارهای من: {to_persian_digits(str(profile.get('warns', 0)))}")
     keyboard = markup([
-        [primary("ℹ️ اطلاعات من", cb("cmd", "me")), primary("⭐️ امتیاز من", cb("cmd", "myrep"))],
+        [primary("ℹ️ اطلاعات من", cb("cmd", "me"))],
         [primary("📜 قوانین گروه", cb("cmd", "rules")), primary("📊 آمار گروه", cb("cmd", "stats"))],
         [primary("💤 وضعیت AFK", cb("cmd", "afkhelp")), primary("📚 راهنما", cb("panel", "help"))],
         row(home()),
@@ -1039,7 +1038,10 @@ def help_text(topic: str) -> str:
             "• <code>قفل فحاشی</code> / <code>قفل پورن</code> / <code>قفل انگلیسی</code>",
             "• <code>قفل چینی</code> / <code>قفل روسی</code> / <code>قفل هندی</code>",
             "• <code>قفل طولانی</code> (پیامِ بیش از ۱۰۰۰ کاراکتر → حذف + سکوت)",
-            "• <code>قفل کانال</code> (ارسال ناشناس با کانال → حذف + مسدود کردن کانال)",
+            "• <code>قفل ناشناس</code> (ارسال با نام کانال دیگر → حذف/مسدودسازی کانال)",
+            "• پیام با نام همین گروه پیش‌فرض از این قفل معاف است؛ سازنده می‌تواند با "
+            "<code>استثنای ناشناس خاموش</code> این معافیت را بردارد.",
+            "• تلگرام هویت انسانیِ مدیر ناشناس را به ربات نشان نمی‌دهد.",
             "• <code>قفل گروه</code> / <code>قفل گروه رسانه</code> / <code>باز کردن گروه</code>",
             "• <code>قفل خروج</code> (بن خودکار هرکس خارج شود)",
             "• <code>بن خروج سریع ۱۰</code> (بنِ خروجِ بلافاصله پس از ورود)",
@@ -1078,7 +1080,7 @@ def help_text(topic: str) -> str:
             "📊 <b>آمار</b>", "",
             "• <code>آمار</code> — آمار کلی گروه",
             "• <code>فعال‌ترین‌ها ۱۰</code> / <code>غیرفعال‌ها ۳۰</code>",
-            "• <code>آمار من</code> / <code>رتبه من</code>",
+            "• <code>آمار من</code>",
             "• ℹ️ آمار از زمان حضور ربات جمع‌آوری می‌شود.",
         ]),
         "messages": "\n".join([
@@ -1126,6 +1128,8 @@ def help_text(topic: str) -> str:
             "• <code>ساخت لینک</code> / <code>لینک گروه</code>",
             "• <code>تنظیم عنوان نام جدید</code> / <code>تنظیم توضیحات متن</code>",
             "• <code>بکاپ</code> / <code>آیدی</code> / <code>تاریخ</code> / <code>ساعت</code>",
+            "• ارسال پیوند مستقلِ پست/ریل عمومی اینستاگرام برای دریافت رسانه.",
+            "• <code>آرماندو بگو پرسش</code> — گفت‌وگوی Gemini، در صورت فعال‌سازی مالک ربات.",
         ]),
         "market": "\n".join([
             "💱 <b>ارز، طلا و بورس</b>", "",

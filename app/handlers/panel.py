@@ -69,7 +69,6 @@ COMMAND_HINTS: dict[str, str] = {
     "history": "📜 روی پیام کاربر ریپلای کنید و بنویسید:\n<code>تاریخچه</code>",
     "info": "ℹ️ روی پیام کاربر ریپلای کنید و بنویسید:\n<code>اطلاعات</code>",
     "me": "👤 بنویسید: <code>آمار من</code> یا <code>اطلاعات</code>",
-    "myrep": "⭐️ بنویسید: <code>امتیاز من</code>",
     "afkhelp": "💤 برای رفتن به حالت AFK بنویسید: <code>برم افک دلیل</code>\nبرای بازگشت: <code>برگشتم</code>",
     "stats": "📊 بنویسید: <code>آمار</code>",
     "top": "🏆 بنویسید: <code>فعال‌ترین‌ها ۳۰</code>",
@@ -228,7 +227,6 @@ async def _prepare_ctx(session: AsyncSession, bot: Bot, chat_id: int, user_id: i
         ctx["report_counts"] = {"open": int(open_count), "total": int(total)}
     if section == "profile":
         from ..db.models import User
-        from ..services.reputation import get_score
 
         state_result = await session.execute(
             select(ChatMemberState).where(ChatMemberState.chat_id == chat_id,
@@ -239,7 +237,6 @@ async def _prepare_ctx(session: AsyncSession, bot: Bot, chat_id: int, user_id: i
             select(func.count(Warning.id)).where(Warning.chat_id == chat_id,
                                                  Warning.user_id == user_id,
                                                  Warning.active.is_(True))) or 0
-        positive, negative, score = await get_score(session, chat_id, user_id)
         ctx["profile"] = {
             "user_id": user_id,
             "name": f"{user.first_name or ''} {user.last_name or ''}".strip() if user else "—",
@@ -247,7 +244,6 @@ async def _prepare_ctx(session: AsyncSession, bot: Bot, chat_id: int, user_id: i
             "role": ROLE_LABELS.get(_role_key(actor), "👤 عضو") if actor else "👤 عضو",
             "tag": state.tag if state else None,
             "messages": int(state.message_count or 0) if state else 0,
-            "score": int(score),
             "warns": int(warns),
         }
     return ctx
@@ -324,7 +320,6 @@ async def _send_member_panel(bot: Bot, chat_id: int, user_id: int, session: Asyn
     state = await get_member_state_snapshot(session, target_chat_id, user_id)
     chat = await session.get(Chat, target_chat_id)
     warns = int(state.get("warn_count") or 0)
-    reputation = int(state.get("reputation_total") or 0)
     tag = state.get("tag") or "—"
     lines = [
         f"🤖 <b>{BOT_NAME}</b>",
@@ -334,7 +329,6 @@ async def _send_member_panel(bot: Bot, chat_id: int, user_id: int, session: Asyn
         f"🎖 سمت شما: {ROLE_LABELS.get('member', 'عضو')}",
         f"🏷 تگ شما: <code>{tag}</code>",
         f"⚠️ اخطارها: {to_persian_digits(str(warns))}",
-        f"⭐️ اعتبار: {to_persian_digits(str(reputation))}",
         "",
         "ℹ️ پنل مدیریت گروه فقط برای مدیران و مالک گروه نمایش داده می‌شود.",
         "برای دیدن دستورات آزاد بنویسید: <code>راهنما</code>",

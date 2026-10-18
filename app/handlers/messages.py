@@ -10,7 +10,7 @@ Pipeline order (cheapest and most important first):
 6. anti-flood / repeat / mention spam
 7. optional AI moderation
 8. custom triggers (notes, personal commands, filters, magic triggers)
-9. reputation & games
+9. optional chat helpers and games
 """
 
 from __future__ import annotations
@@ -37,7 +37,6 @@ from ..services import (
     moderation as mod,
     permissions,
     personal,
-    reputation,
 )
 from ..services import notes as note_service
 from ..services.chat_state import (
@@ -151,6 +150,12 @@ async def on_group_message(message: Message, session: AsyncSession, bot: Bot) ->
     bypass_locks = actor.bypasses("locks")
     if not bypass_locks:
         locks = await lock_service.get_locks_map(session, chat.id)
+        if (sender_chat is not None and sender_chat.id == chat.id
+                and settings.get("anonymous_sender_exempt", True)):
+            # This is the explicitly selected default: exempt only a post made
+            # as this exact group, not a foreign channel identity.
+            locks = dict(locks)
+            locks.pop("anonymous", None)
         violation = await lock_service.check_message(message, locks)
         if violation is None and settings.get("anti_profanity_enabled"):
             matches = detect_profanity(text)
@@ -249,29 +254,19 @@ async def on_group_message(message: Message, session: AsyncSession, bot: Bot) ->
             await _notify(bot, chat.id, "🤖 پیام توسط سیستم هوشمند حذف شد.", ttl=10)
             return
 
+    # ---------------------------------------------------- optional chat helpers
+    from ..services.instagram import handle_instagram_message
+
+    if await handle_instagram_message(message, bot):
+        return
+    from ..services.ai_chat import handle_ai_message
+
+    if await handle_ai_message(message, bot):
+        return
+
     # ------------------------------------------------------- content triggers
     if await _handle_triggers(message, session, bot, text, chat.id, user):
         return
-
-    # ------------------------------------------------------------- reputation
-    if settings.get("reputation_enabled") and message.reply_to_message:
-        from ..services.reputation import is_negative_mark, is_positive_mark
-
-        stripped = (text or "").strip()
-        target_user = message.reply_to_message.from_user
-        if target_user and not target_user.is_bot:
-            if is_positive_mark(stripped):
-                ok, note, score = await reputation.add_vote(session, chat.id, user.id,
-                                                            target_user.id, True)
-                await _notify(bot, chat.id,
-                              f"⭐️ امتیاز {target_user.full_name}: {score}" if ok else note, ttl=10)
-                return
-            if is_negative_mark(stripped):
-                ok, note, score = await reputation.add_vote(session, chat.id, user.id,
-                                                            target_user.id, False)
-                await _notify(bot, chat.id,
-                              f"⭐️ امتیاز {target_user.full_name}: {score}" if ok else note, ttl=10)
-                return
 
     # ----------------------------------------------------------- guess game
     if text.strip().isdigit() or (normalize_text(text, mode="command").strip().isdigit()):

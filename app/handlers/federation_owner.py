@@ -370,28 +370,51 @@ async def cmd_global_ban_list(ctx: CommandContext) -> None:
 
 
 @command("ارسال همگانی", "همگانی", role="founder", category="owner",
-         description="ارسال پیام به همه گروه‌ها (مالک ربات)", allow_in_private=True)
+         description="کپی پیام به همهٔ چت‌های فعال (فقط مالک ربات)",
+         usage="ارسال همگانی «متن» یا پاسخ به پیام", allow_in_private=True)
 async def cmd_broadcast(ctx: CommandContext) -> None:
     if not ctx.actor.is_bot_owner:
         return
-    text = ctx.arg_text.strip()
-    if not text and ctx.message.reply_to_message:
-        text = ctx.message.reply_to_message.text or ctx.message.reply_to_message.caption or ""
-    if not text:
-        await ctx.reply("⚠️ متن پیام را بنویسید: <code>ارسال همگانی متن شما</code>")
+
+    from ..services.broadcast import extract_broadcast_text, media_group_cache
+
+    source = ctx.message.reply_to_message
+    text = extract_broadcast_text(ctx.raw_text, ctx.command)
+    if source is None and not text:
+        await ctx.reply("⚠️ متن را داخل گیومه بنویسید یا به پیام موردنظر پاسخ دهید.\n"
+                        "نمونه: <code>ارسال همگانی &quot;سلام به همه&quot;</code>")
         return
+
     result = await ctx.session.execute(select(Chat.id).where(Chat.is_active.is_(True)))
-    chat_ids = [row[0] for row in result.all()]
+    chat_ids = [int(row[0]) for row in result.all()]
     sent, failed = 0, 0
-    from ..core.errors import safe_send
+
+    album_ids: list[int] = []
+    if source is not None and source.media_group_id:
+        album_ids = media_group_cache.get_message_ids(
+            source.chat.id, str(source.media_group_id))
 
     for chat_id in chat_ids:
-        message = await safe_send(ctx.bot, chat_id, f"📢 <b>اطلاعیه</b>\n\n{text}",
-                                  parse_mode="HTML")
-        if message is None:
-            failed += 1
-        else:
+        try:
+            if source is not None:
+                if len(album_ids) > 1:
+                    await ctx.bot.copy_messages(
+                        chat_id=chat_id, from_chat_id=source.chat.id,
+                        message_ids=album_ids)
+                else:
+                    await ctx.bot.copy_message(
+                        chat_id=chat_id, from_chat_id=source.chat.id,
+                        message_id=source.message_id)
+            else:
+                await ctx.bot.send_message(
+                    chat_id=chat_id, text=f"📢 اطلاعیه\n\n{text}",
+                    parse_mode=None, disable_web_page_preview=True)
             sent += 1
+        except Exception as exc:  # noqa: BLE001 - protected content and Telegram limits vary
+            failed += 1
+            logger.info("ارسال همگانی به چت %s ناموفق بود: %s",
+                        chat_id, exc.__class__.__name__)
+
     await ctx.reply(f"📢 ارسال همگانی انجام شد.\n✅ موفق: {to_persian_digits(str(sent))}\n"
                     f"⚠️ ناموفق: {to_persian_digits(str(failed))}")
 

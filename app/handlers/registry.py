@@ -37,6 +37,7 @@ class Command:
     #   "none"    - the message must be exactly the phrase
     #   "keys"    - every argument must be a known keyword (arg_vocab)
     #   "numeric" - every argument must contain a number / time
+    #   "quoted"  - free text only when explicitly wrapped in quotes
     #   "free"    - short free text (or unlimited when the text has "=")
     arg_kind: str = ""
     arg_vocab: str = ""
@@ -101,7 +102,7 @@ class CommandRegistry:
             if command is None:
                 continue
             args = tokens[size:]
-            if args_are_valid(command, args):
+            if args_are_valid(command, args, raw_text=raw_text, matched_phrase=candidate):
                 return Match(command=command, phrase=candidate, args=args)
             return None  # phrase + ordinary words = conversation, not a command
         return None
@@ -143,6 +144,7 @@ MODE_WORDS = frozenset({
 })
 
 CAPTCHA_WORDS = frozenset({"دکمه", "ریاضی", "ایموجی", "تصادفی", "button", "math", "emoji"})
+TOGGLE_WORDS = frozenset({"روشن", "خاموش"})
 
 _TAIL_PUNCTUATION = "؟?!.؛;،,:«»'\"()[]{}…"
 
@@ -187,6 +189,8 @@ def _vocab_validator(vocab: str, token: str) -> bool:
         return token in MODE_WORDS
     if vocab == "captcha":
         return token in CAPTCHA_WORDS
+    if vocab == "toggle":
+        return token in TOGGLE_WORDS
     return False
 
 
@@ -196,13 +200,36 @@ _TARGET_ID_RE = re.compile(r"^\d{5,15}$")
 _CHAT_ID_RE = re.compile(r"^-?\d{5,15}$")
 
 
-def args_are_valid(command: Command, args: list[str]) -> bool:
+def _has_quoted_payload(raw_text: str, matched_phrase: str) -> bool:
+    """True only when a broadcast body is explicitly delimited by quotes."""
+    raw = (raw_text or "").strip()
+    wanted = normalize_text(matched_phrase, mode="command").split()
+    found: list[str] = []
+    body_start = -1
+    for match in re.finditer(r"\S+", raw):
+        found.extend(normalize_text(match.group(0), mode="command").split())
+        if wanted[:len(found)] != found:
+            return False
+        if found == wanted:
+            body_start = match.end()
+            break
+    if body_start < 0:
+        return False
+    body = raw[body_start:].strip()
+    return ((len(body) >= 2 and body[0] == body[-1] and body[0] in {'"', "'"})
+            or (len(body) >= 2 and body[0] == "«" and body[-1] == "»"))
+
+
+def args_are_valid(command: Command, args: list[str], *, raw_text: str = "",
+                   matched_phrase: str = "") -> bool:
     """Decide whether ``args`` look like real arguments or like a sentence."""
     kind = command.arg_kind or ("none" if not command.usage else "free")
     if not args:
         return True
     if kind == "none":
         return False
+    if kind == "quoted":
+        return _has_quoted_payload(raw_text, matched_phrase)
     if kind == "target":
         # ``لغو سکوت @Parhannni`` / ``لغو سکوت 123456`` / a short name.
         first = args[0]
@@ -238,6 +265,8 @@ def args_are_valid(command: Command, args: list[str]) -> bool:
 # Rules for the commands that take arguments (keyed by the first phrase).
 ARG_RULES: dict[str, tuple[str, str]] = {
     "آیدی گروه": ("chatref", ""),
+    "ارسال همگانی": ("quoted", ""),
+    "استثنای ناشناس": ("keys", "toggle"),
     "عدد تصادفی": ("numeric", ""),
     "ارز": ("keys", "market"),
     "قیمت": ("keys", "market"),

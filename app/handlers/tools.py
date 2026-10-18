@@ -1,5 +1,5 @@
 """Utility commands: pins, purge, tags, AFK, reports, staff, trust, logs,
-scheduling, backup, connection, reputation and help."""
+scheduling, backup, connection and help."""
 
 from __future__ import annotations
 
@@ -18,7 +18,6 @@ from ..keyboards.menus import BOT_NAME, help_text
 from ..db.models import (
     AuditLog,
     BotRole,
-    ChatMemberState,
     Report,
     ScheduledMessage,
     TrustedUser,
@@ -33,7 +32,6 @@ from ..services import (
     personal,
     pins as pin_service,
     purge as purge_service,
-    reputation,
     tags as tag_service,
 )
 from ..services.chat_state import (get_settings, invalidate_member, invalidate_settings,
@@ -830,37 +828,6 @@ async def cmd_disabled_list(ctx: CommandContext) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Reputation
-# --------------------------------------------------------------------------- #
-@command("امتیاز من", "اعتبار من", role="member", category="members",
-         description="نمایش امتیاز شما")
-async def cmd_my_rep(ctx: CommandContext) -> None:
-    positive, negative, score = await reputation.get_score(ctx.session, ctx.chat_id, ctx.user_id)
-    await ctx.reply(f"⭐️ امتیاز شما: {to_persian_digits(str(score))}\n"
-                    f"👍 مثبت: {to_persian_digits(str(positive))} | "
-                    f"👎 منفی: {to_persian_digits(str(negative))}")
-
-
-@command("جدول اعتبار", "برترین‌ها از نظر امتیاز", role="member", category="members",
-         description="نمایش جدول اعتبار")
-async def cmd_rep_board(ctx: CommandContext) -> None:
-    await ctx.reply(await reputation.leaderboard_text(ctx.session, ctx.chat_id))
-
-
-@command("ریست اعتبار", role="admin", permission="manage", category="members",
-         description="صفر کردن امتیاز یک کاربر")
-async def cmd_reset_rep(ctx: CommandContext) -> None:
-    if not await require(ctx, role="admin", permission="manage"):
-        return
-    target = await ctx.target()
-    if target is None or not target.user_id:
-        await ctx.reply("❌ کاربر هدف مشخص نشد.")
-        return
-    await reputation.reset_score(ctx.session, ctx.chat_id, target.user_id)
-    await ctx.reply(f"♻️ امتیاز {user_html(target.user_id, target.full_name)} صفر شد.")
-
-
-# --------------------------------------------------------------------------- #
 # Help / panel entry points
 # --------------------------------------------------------------------------- #
 HELP_TOPICS: dict[str, str] = {
@@ -895,7 +862,8 @@ async def cmd_help(ctx: CommandContext) -> None:
              "• <code>راهنما فیلترها</code>",
              "• <code>راهنما خوشامد</code>",
              "• <code>راهنما سرگرمی</code>",
-             "• <code>راهنما ارز</code>", "",
+             "• <code>راهنما ارز</code>",
+             "• <code>راهنما ابزارها</code>", "",
              "🎛 برای پنل گرافیکی: <code>پنل</code> یا <code>تنظیمات</code>"]
     await ctx.reply("\n".join(lines))
 
