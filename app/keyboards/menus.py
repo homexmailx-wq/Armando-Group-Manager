@@ -562,7 +562,7 @@ def _panel_night(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
 
 def _panel_messages(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
     settings = ctx["settings"]
-    text = "\n".join([
+    text_lines = [
         "📌 <b>مدیریت پیام‌ها</b>",
         "",
         "دستورها:",
@@ -570,16 +570,27 @@ def _panel_messages(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
         "• <code>حذف پین</code> • <code>پین فعلی</code> • <code>حذف همه پین‌ها</code>",
         "• <code>پاکسازی ۱۰۰</code> • <code>پاکسازی</code> (از پیام ریپلایی تا حالا)",
         "• <code>قوانین</code> • <code>تنظیم قوانین متن...</code> • <code>حذف قوانین</code>",
-    ])
-    keyboard = markup([
+    ]
+    rows = [
         [primary("📌 پین", cb("cmd", "pin")), primary("📍 حذف پین", cb("cmd", "unpin")),
          primary("📌 پین فعلی", cb("cmd", "getpin"))],
         [primary("📜 مشاهده قوانین", cb("cmd", "rules")), primary("✏️ ویرایش قوانین", cb("cmd", "setrules"))],
         [primary("🧹 پاکسازی ۱۰۰", cb("cmd", "purge100")), danger("🧹 حذف همه پین‌ها", cb("conf", "unpinall", "all"))],
         [primary("📜 قوانین", cb("panel", "rules"))],
-        row(home()),
-    ])
-    return text, keyboard
+    ]
+    if int(ctx.get("level", 0)) >= level_of("admin"):
+        raw_delay = settings.get("report_delete_after")
+        delay = 12 if raw_delay is None else int(raw_delay)
+        text_lines.extend([
+            "",
+            f"⏱ حذف خودکار گزارش‌های پایان ارسال همگانی و اسکن حساب‌های حذف‌شده: "
+            f"{to_persian_digits(str(delay))} ثانیه (۰ = خاموش).",
+            "این مقدار فقط برای همین گروه است.",
+        ])
+        rows.append(number_buttons("ثانیه", "report_delete_after", delay, "messages",
+                                   step=1, minimum=0, maximum=600))
+    rows.append(row(home()))
+    return "\n".join(text_lines), markup(rows)
 
 
 def _panel_rules(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
@@ -676,10 +687,13 @@ def admin_rights_keyboard(user_id: int, rights: dict) -> InlineKeyboardMarkup:
 
 def _panel_members(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
     counts = ctx.get("member_counts") or {}
+    admins = counts.get("admins")
+    admin_count_text = (to_persian_digits(str(admins)) if admins is not None
+                        else "نامشخص")
     text = "\n".join([
         "👥 <b>اعضا و مدیران</b>",
         "",
-        f"👮 مدیران تلگرام: {to_persian_digits(str(counts.get('admins', 0)))}",
+        f"👮 مدیران تلگرام: {admin_count_text}",
         f"🛡 کادر ربات: {to_persian_digits(str(counts.get('staff', 0)))}",
         f"⭐️ کاربران ویژه: {to_persian_digits(str(counts.get('trusted', 0)))}",
         f"🏷 تگ‌دارها: {to_persian_digits(str(counts.get('tags', 0)))}",
@@ -1092,7 +1106,8 @@ def help_text(topic: str) -> str:
             "📌 <b>پیام‌ها</b>", "",
             "• <code>پین</code> (با ریپلای) / <code>لغو پین</code> / <code>لغو همه پین‌ها</code>",
             "• <code>پاکسازی ۱۰۰</code> / <code>سنجاق لیست</code>",
-            "• <code>زمان‌بندی ۲۴ساعت متن پیام</code>",
+            "• <code>زمان‌بندی ۲۴ساعت متن پیام</code> / <code>لیست زمان‌بندی</code>",
+            "• <code>حذف زمان‌بندی ۱</code> — حذف زمان‌بندی با شناسهٔ فهرست",
         ]),
         "members": "\n".join([
             "👥 <b>اعضا</b>", "",

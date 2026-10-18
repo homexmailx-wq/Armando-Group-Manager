@@ -12,9 +12,10 @@ from telethon import TelegramClient, functions, types, utils
 from telethon.errors import ChannelInvalidError, FloodWaitError
 
 from .. import config
+from ..core.errors import schedule_delete
 from ..core.normalization import to_persian_digits
 from ..db import session_scope
-from ..db.models import Chat
+from ..db.models import Chat, ChatSettings
 
 logger = logging.getLogger("armando.deleted_accounts")
 _PAGE_SIZE = 200
@@ -184,6 +185,19 @@ class DeletedAccountScanner:
                 await asyncio.sleep(_PAGE_PAUSE_SECONDS)
         return sorted(deleted), incomplete
 
+    async def _report_delete_after(self, chat_id: int) -> int:
+        """Read the per-group report delay; preserve the 12s default on DB errors."""
+        try:
+            async with session_scope() as session:
+                value = await session.scalar(
+                    select(ChatSettings.report_delete_after).where(
+                        ChatSettings.chat_id == chat_id))
+            return 12 if value is None else max(0, min(600, int(value)))
+        except Exception as exc:  # noqa: BLE001 - a report should still be sent
+            logger.info("could not load report deletion delay for chat %s: %s",
+                        chat_id, exc.__class__.__name__)
+            return 12
+
     async def _ban_and_report(self, chat_id: int, user_ids: list[int], *,
                               incomplete: bool = False) -> None:
         banned: list[int] = []
@@ -219,18 +233,26 @@ class DeletedAccountScanner:
             lines.append("⚠️ این نوبت همهٔ اعضا بررسی نشد؛ تلگرام یا سقف اسکن ادامهٔ فهرست را محدود کرد.")
         lines.append("ℹ️ فهرست اعضا ممکن است به‌علت محدودیت تلگرام کامل نباشد.")
         text = "\n".join(lines)
+        delete_after = await self._report_delete_after(chat_id)
         try:
-            await self.bot.send_message(chat_id=chat_id, text=text,
-                                        parse_mode="HTML", disable_web_page_preview=True)
+            report = await self.bot.send_message(
+                chat_id=chat_id, text=text,
+                parse_mode="HTML", disable_web_page_preview=True)
+            if report is not None:
+                schedule_delete(self.bot, chat_id, report.message_id, delete_after,
+                                context="deleted_accounts_report_autodelete")
         except Exception as exc:  # noqa: BLE001 - channel posting rights can differ from ban rights
             logger.info("ارسال گزارش اسکن به چت %s ناموفق بود: %s",
                         chat_id, exc.__class__.__name__)
             owner_id = config.settings.owner_id
             if owner_id:
                 try:
-                    await self.bot.send_message(
+                    report = await self.bot.send_message(
                         chat_id=owner_id,
                         text=f"⚠️ گزارش پاکسازی چت <code>{chat_id}</code>\n{text}",
                         parse_mode="HTML", disable_web_page_preview=True)
+                    if report is not None:
+                        schedule_delete(self.bot, owner_id, report.message_id, delete_after,
+                                        context="deleted_accounts_owner_report_autodelete")
                 except Exception:  # noqa: BLE001 - owner may not have opened the bot
                     pass

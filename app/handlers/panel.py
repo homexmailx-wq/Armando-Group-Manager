@@ -17,7 +17,8 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core import cache
-from ..core.errors import safe_answer, safe_call, safe_delete, safe_edit
+from ..core.errors import (safe_answer, safe_call, safe_delete, safe_edit,
+                           safe_edit_markup, schedule_delete)
 from ..core.normalization import to_persian_digits
 from ..db.models import (
     BotRole,
@@ -170,15 +171,37 @@ async def _prepare_ctx(session: AsyncSession, bot: Bot, chat_id: int, user_id: i
             "commands": len(commands),
         }
     if section == "members":
-        staff = await session.execute(
-            select(BotRole).where(BotRole.chat_id == chat_id))
+        # Telegram is the source of truth for Telegram administrators. Do not
+        # report a false zero when the Bot API lookup is unavailable.
+        try:
+            admins = await bot.get_chat_administrators(chat_id=chat_id)
+            admin_count: int | None = len({
+                int(item.user.id) for item in admins or []
+                if getattr(item, "user", None) is not None
+            })
+        except Exception as exc:  # noqa: BLE001 - keep the panel usable
+            logger.info("could not load administrator count for chat %s: %s",
+                        chat_id, exc.__class__.__name__)
+            admin_count = None
+
+        staff_rows = await session.execute(
+            select(BotRole.user_id).where(BotRole.chat_id == chat_id))
+        staff_ids = {int(user_id_) for user_id_ in staff_rows.scalars().all()}
+        # Older deployments may have internal roles only on chat_members.
+        legacy_staff = await session.execute(
+            select(ChatMemberState.user_id).where(
+                ChatMemberState.chat_id == chat_id,
+                ChatMemberState.bot_role.is_not(None),
+                ChatMemberState.bot_role != ""))
+        staff_ids.update(int(user_id_) for user_id_ in legacy_staff.scalars().all())
+
         trusted = await session.execute(
-            select(TrustedUser).where(TrustedUser.chat_id == chat_id))
+            select(TrustedUser.user_id).where(TrustedUser.chat_id == chat_id))
         tags = await tag_service.tags_of_chat(session, chat_id)
         ctx["member_counts"] = {
-            "admins": extra.get("admin_count", 0),
-            "staff": len(list(staff.scalars().all())),
-            "trusted": len(list(trusted.scalars().all())),
+            "admins": admin_count,
+            "staff": len(staff_ids),
+            "trusted": len({int(user_id_) for user_id_ in trusted.scalars().all()}),
             "tags": len(tags),
         }
     if section == "staff":
@@ -1115,7 +1138,8 @@ async def on_owner_broadcast(callback: CallbackQuery, session: AsyncSession, bot
                     owner_broadcast._selection_text(draft, chats, bool(state.broadcast_enabled),
                                                     delegated=False),
                     reply_markup=owner_broadcast.selection_keyboard(
-                        draft, chats, bool(state.broadcast_enabled), delegated=False),
+                        draft, chats, bool(state.broadcast_enabled), delegated=False,
+                        report_delete_after=int(state.broadcast_report_delete_after or 0)),
                     parse_mode=ParseMode.HTML)
             elif callback.message is not None:
                 await safe_edit(
@@ -1123,7 +1147,9 @@ async def on_owner_broadcast(callback: CallbackQuery, session: AsyncSession, bot
                     "📢 وضعیت ارسال همگانی تغییر کرد: "
                     + ("🟢 روشن" if state.broadcast_enabled else "🔴 خاموش")
                     + "\nبرای آماده‌سازی پیام، دوباره فرمان ارسال همگانی را بفرستید.",
-                    reply_markup=owner_broadcast.switch_keyboard(bool(state.broadcast_enabled)),
+                    reply_markup=owner_broadcast.switch_keyboard(
+                        bool(state.broadcast_enabled),
+                        int(state.broadcast_report_delete_after or 0)),
                     parse_mode=ParseMode.HTML)
         elif callback.message is not None:
             await safe_edit(
@@ -1131,9 +1157,63 @@ async def on_owner_broadcast(callback: CallbackQuery, session: AsyncSession, bot
                 "📢 وضعیت ارسال همگانی: "
                 + ("🟢 روشن" if state.broadcast_enabled else "🔴 خاموش")
                 + "\nبرای ادامه، فرمان ارسال همگانی را دوباره بفرستید.",
-                reply_markup=owner_broadcast.switch_keyboard(bool(state.broadcast_enabled)),
+                reply_markup=owner_broadcast.switch_keyboard(
+                    bool(state.broadcast_enabled),
+                    int(state.broadcast_report_delete_after or 0)),
                 parse_mode=ParseMode.HTML)
         await safe_answer(callback, "✅ وضعیت ذخیره شد.")
+        return
+
+    if action == "delay":
+        if not is_owner:
+            await safe_answer(callback, "⛔️ فقط مالک ربات می‌تواند زمان حذف نتیجهٔ خصوصی را تغییر دهد.",
+                              show_alert=True)
+            return
+        if len(parts) < 4 or not parts[3].lstrip("-").isdigit():
+            await safe_answer(callback, "⛔️ مقدار زمان نامعتبر است.", show_alert=True)
+            return
+        delta = int(parts[3])
+        if delta not in {-1, 1}:
+            await safe_answer(callback, "⛔️ مقدار تغییر نامعتبر است.", show_alert=True)
+            return
+        state = await owner_broadcast.get_bot_settings(session)
+        current_delay = getattr(state, "broadcast_report_delete_after", 12)
+        current_delay = 12 if current_delay is None else int(current_delay)
+        state.broadcast_report_delete_after = max(0, min(600, current_delay + delta))
+        state.updated_by = user_id
+        await session.flush()
+        value = int(state.broadcast_report_delete_after)
+        value_text = "خاموش" if value == 0 else f"{to_persian_digits(str(value))} ثانیه"
+        await safe_answer(callback, f"✅ زمان حذف نتیجهٔ خصوصی: {value_text}")
+        if callback.message is not None:
+            if draft_id:
+                draft = await owner_broadcast.get_draft(session, draft_id, user_id)
+                if draft is not None:
+                    chats = await owner_broadcast.effective_chats(
+                        session, user_id,
+                        message_chat_id=callback.message.chat.id,
+                        message_chat_type=callback.message.chat.type)
+                    if draft.stage == "review":
+                        await safe_edit(
+                            callback.message,
+                            owner_broadcast.review_text(draft, chats, delegated=False),
+                            reply_markup=owner_broadcast.review_keyboard(
+                                draft, bool(state.broadcast_enabled), delegated=False,
+                                report_delete_after=value),
+                            parse_mode=ParseMode.HTML)
+                    else:
+                        await safe_edit(
+                            callback.message,
+                            owner_broadcast._selection_text(
+                                draft, chats, bool(state.broadcast_enabled), delegated=False),
+                            reply_markup=owner_broadcast.selection_keyboard(
+                                draft, chats, bool(state.broadcast_enabled), delegated=False,
+                                report_delete_after=value),
+                            parse_mode=ParseMode.HTML)
+            else:
+                await safe_edit_markup(
+                    callback.message,
+                    owner_broadcast.switch_keyboard(bool(state.broadcast_enabled), value))
         return
 
     draft = await owner_broadcast.get_draft(session, draft_id, user_id) if draft_id else None
@@ -1165,7 +1245,8 @@ async def on_owner_broadcast(callback: CallbackQuery, session: AsyncSession, bot
                 callback.message,
                 owner_broadcast._selection_text(draft, chats, False, delegated=delegated),
                 reply_markup=owner_broadcast.selection_keyboard(
-                    draft, chats, False, delegated=delegated),
+                    draft, chats, False, delegated=delegated,
+                    report_delete_after=int(state.broadcast_report_delete_after or 0)),
                 parse_mode=ParseMode.HTML)
         return
 
@@ -1283,7 +1364,18 @@ async def on_owner_broadcast(callback: CallbackQuery, session: AsyncSession, bot
             result_lines.append(
                 f"🔐 ردشدن به‌علت تغییر دسترسی/عضویت: {to_persian_digits(str(skipped_access))}")
         if callback.message is not None:
-            await safe_edit(callback.message, "\n".join(result_lines), parse_mode=ParseMode.HTML)
+            edited = await safe_edit(callback.message, "\n".join(result_lines),
+                                     parse_mode=ParseMode.HTML)
+            if edited is not None:
+                if callback.message.chat.type == "private":
+                    raw_delay = getattr(state, "broadcast_report_delete_after", 12)
+                    delete_after = 12 if raw_delay is None else int(raw_delay)
+                else:
+                    chat_settings = await get_settings(session, callback.message.chat.id)
+                    delete_after = int(chat_settings.report_delete_after or 0)
+                schedule_delete(bot, callback.message.chat.id,
+                                callback.message.message_id, delete_after,
+                                context="broadcast_result_autodelete")
         return
     else:
         await safe_answer(callback)
@@ -1299,7 +1391,8 @@ async def on_owner_broadcast(callback: CallbackQuery, session: AsyncSession, bot
             callback.message,
             owner_broadcast.review_text(draft, chats, delegated=delegated),
             reply_markup=owner_broadcast.review_keyboard(
-                draft, bool(state.broadcast_enabled), delegated=delegated),
+                draft, bool(state.broadcast_enabled), delegated=delegated,
+                report_delete_after=int(state.broadcast_report_delete_after or 0)),
             parse_mode=ParseMode.HTML)
     else:
         await safe_edit(
@@ -1307,7 +1400,8 @@ async def on_owner_broadcast(callback: CallbackQuery, session: AsyncSession, bot
             owner_broadcast._selection_text(draft, chats, bool(state.broadcast_enabled),
                                             delegated=delegated),
             reply_markup=owner_broadcast.selection_keyboard(
-                draft, chats, bool(state.broadcast_enabled), delegated=delegated),
+                draft, chats, bool(state.broadcast_enabled), delegated=delegated,
+                report_delete_after=int(state.broadcast_report_delete_after or 0)),
             parse_mode=ParseMode.HTML)
 
 

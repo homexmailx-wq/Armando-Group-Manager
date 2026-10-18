@@ -11,6 +11,7 @@ from datetime import datetime
 
 from sqlalchemy import select
 
+from ..core.duration import parse_duration
 from ..core.errors import safe_call
 from ..core.normalization import normalize_digits, normalize_text, to_persian_digits
 from ..core.timeutils import persian_datetime
@@ -1277,28 +1278,33 @@ async def cmd_set_description(ctx: CommandContext) -> None:
 # --------------------------------------------------------------------------- #
 @command("ساخت لینک", "لینک جدید", "لینک موقت", "لینک دعوت", "ایجاد لینک",
          role="admin", permission="invite", category="tools",
-         description="ساخت لینک دعوت موقت گروه", usage="ساخت لینک")
+         description="ساخت لینک دعوت موقت گروه (پیش‌فرض: ۶۰ دقیقه)",
+         usage="ساخت لینک [مدت؛ مثل ۱ ساعت]")
 async def cmd_create_link(ctx: CommandContext) -> None:
     from datetime import datetime, timedelta
-
-    from ..core.errors import safe_call
-    from ..core.normalization import to_persian_digits
+    from math import ceil
 
     if not await require(ctx, role="admin", permission="invite"):
         return
-    minutes = 60
+    if not await _require_bot_right(ctx, "can_invite_users", "دعوت کاربران با لینک"):
+        return
+    # No duration argument means a one-hour invite. Parse explicit durations
+    # as seconds so «۱ ساعت» is exactly 60 minutes (not 6 hours).
+    duration_seconds = 60 * 60
     limit = 1
     raw = normalize_text(ctx.arg_text, mode="command")
-    if "ساعت" in raw:
-        minutes = 60 * 6
     if "نامحدود" in raw or "دائم" in raw:
-        minutes, limit = 0, 0
+        duration_seconds, limit = 0, 0
+    elif raw:
+        parsed = parse_duration(raw)
+        if parsed is not None:
+            duration_seconds = parsed
     kwargs: dict[str, object] = {
         "chat_id": ctx.chat_id,
         "name": f"Armando-{ctx.user_id}",
     }
-    if minutes:
-        kwargs["expire_date"] = int((datetime.utcnow() + timedelta(minutes=minutes)).timestamp())
+    if duration_seconds:
+        kwargs["expire_date"] = int((datetime.utcnow() + timedelta(seconds=duration_seconds)).timestamp())
     if limit:
         kwargs["member_limit"] = limit
     link = await safe_call(lambda: ctx.bot.create_chat_invite_link(**kwargs),
@@ -1308,7 +1314,8 @@ async def cmd_create_link(ctx: CommandContext) -> None:
                         "را داشته باشد.")
         return
     details = []
-    if minutes:
+    if duration_seconds:
+        minutes = ceil(duration_seconds / 60)
         details.append(f"⏳ اعتبار: {to_persian_digits(str(minutes))} دقیقه")
     if limit:
         details.append(f"👤 تعداد مجاز: {to_persian_digits(str(limit))} نفر")

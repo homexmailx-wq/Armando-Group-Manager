@@ -555,7 +555,8 @@ async def cmd_broadcast(ctx: CommandContext) -> None:
             "نمونه: <code>ارسال همگانی &quot;سلام به همه&quot;</code>\n"
             f"{destination_hint}\n"
             f"وضعیت قابلیت: {'🟢 روشن' if state.broadcast_enabled else '🔴 خاموش'}")
-        keyboard = (owner_broadcast.switch_keyboard(state.broadcast_enabled)
+        keyboard = (owner_broadcast.switch_keyboard(
+            state.broadcast_enabled, int(state.broadcast_report_delete_after or 0))
                     if is_owner else None)
         await ctx.reply(message_text, reply_markup=keyboard)
         return
@@ -584,7 +585,8 @@ async def cmd_broadcast(ctx: CommandContext) -> None:
         owner_broadcast._selection_text(draft, chats, bool(state.broadcast_enabled),
                                         delegated=delegated),
         reply_markup=owner_broadcast.selection_keyboard(
-            draft, chats, bool(state.broadcast_enabled), delegated=delegated))
+            draft, chats, bool(state.broadcast_enabled), delegated=delegated,
+            report_delete_after=int(state.broadcast_report_delete_after or 0)))
 
 
 @command("آمار ربات", role="founder", category="owner", description="آمار کلی ربات",

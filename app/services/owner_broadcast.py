@@ -9,6 +9,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
+from ..core.normalization import to_persian_digits
 from ..db.models import BotSettings, BroadcastDraft, Chat
 from ..keyboards.factory import cb, danger, markup, primary, row, success
 from . import owner_access
@@ -100,6 +101,16 @@ def _chat_label(chat: Chat, *, escape_text: bool = True) -> str:
     return f"{kind} {title}"
 
 
+def _private_report_delay_row(delay: int, draft_id: int) -> list:
+    delay = max(0, min(600, int(delay)))
+    label = "خاموش" if delay == 0 else f"{to_persian_digits(str(delay))} ثانیه"
+    return row(
+        primary("➖ ۱ث", cb("bc", "delay", draft_id, -1)),
+        primary(f"⏱ حذف گزارش خصوصی: {label}", cb("bc", "noop")),
+        success("➕ ۱ث", cb("bc", "delay", draft_id, 1)),
+    )
+
+
 def _selection_text(draft: BroadcastDraft, chats: list[Chat], enabled: bool,
                     *, delegated: bool) -> str:
     selected_ids = {int(item) for item in (draft.selected_chat_ids or [])}
@@ -125,11 +136,12 @@ def _selection_text(draft: BroadcastDraft, chats: list[Chat], enabled: bool,
 
 
 def selection_keyboard(draft: BroadcastDraft, chats: list[Chat], enabled: bool,
-                       *, delegated: bool) -> object:
+                       *, delegated: bool, report_delete_after: int = 12) -> object:
     if not enabled:
         rows = []
         if not delegated:
             rows.append([success("🟢 روشن‌کردن ارسال همگانی", cb("bc", "switch", draft.id))])
+            rows.append(_private_report_delay_row(report_delete_after, draft.id))
         rows.append([danger("لغو", cb("bc", "cancel", draft.id))])
         return markup(rows)
     pages = max(1, (len(chats) + PAGE_SIZE - 1) // PAGE_SIZE)
@@ -166,6 +178,7 @@ def selection_keyboard(draft: BroadcastDraft, chats: list[Chat], enabled: bool,
             "🔴 خاموش‌کردن ارسال همگانی" if enabled else "🟢 روشن‌کردن ارسال همگانی",
             cb("bc", "switch", draft.id),
         )])
+        rows.append(_private_report_delay_row(report_delete_after, draft.id))
     return markup(rows)
 
 
@@ -192,7 +205,8 @@ def review_text(draft: BroadcastDraft, chats: list[Chat], *, delegated: bool) ->
     return "\n".join(lines)
 
 
-def review_keyboard(draft: BroadcastDraft, enabled: bool, *, delegated: bool) -> object:
+def review_keyboard(draft: BroadcastDraft, enabled: bool, *, delegated: bool,
+                    report_delete_after: int = 12) -> object:
     rows = []
     if enabled:
         rows.append(row(
@@ -207,10 +221,14 @@ def review_keyboard(draft: BroadcastDraft, enabled: bool, *, delegated: bool) ->
             rows.append([danger("🔴 خاموش‌کردن ارسال همگانی", cb("bc", "switch", draft.id))])
         else:
             rows.append([success("🟢 روشن‌کردن ارسال همگانی", cb("bc", "switch", draft.id))])
+        rows.append(_private_report_delay_row(report_delete_after, draft.id))
     return markup(rows)
 
 
-def switch_keyboard(enabled: bool) -> object:
+def switch_keyboard(enabled: bool, report_delete_after: int = 12) -> object:
     label = "🔴 خاموش‌کردن ارسال همگانی" if enabled else "🟢 روشن‌کردن ارسال همگانی"
     style = danger if enabled else success
-    return markup([[style(label, cb("bc", "switch", 0))]])
+    return markup([
+        [style(label, cb("bc", "switch", 0))],
+        _private_report_delay_row(report_delete_after, 0),
+    ])

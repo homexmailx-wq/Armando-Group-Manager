@@ -78,6 +78,17 @@ async def _migration_7(engine: AsyncEngine) -> None:
 
 MIGRATIONS[7] = _migration_7
 
+
+async def _migration_8(engine: AsyncEngine) -> None:
+    """Configurable auto-deletion for bot reports and private broadcast results."""
+    await add_column(engine, "chat_settings", "report_delete_after",
+                     "INTEGER NOT NULL DEFAULT 12")
+    await add_column(engine, "bot_settings", "broadcast_report_delete_after",
+                     "INTEGER NOT NULL DEFAULT 12")
+
+
+MIGRATIONS[8] = _migration_8
+
 CURRENT_VERSION = max(MIGRATIONS) if MIGRATIONS else 0
 
 

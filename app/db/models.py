@@ -196,6 +196,10 @@ class ChatSettings(Base, TimestampMixin):
     goodbye_buttons: Mapped[list | None] = mapped_column(JSON, nullable=True)
     goodbye_delete_after: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
+    # Auto-delete reports created by the bot in this group (0 = disabled).
+    report_delete_after: Mapped[int] = mapped_column(
+        Integer, default=12, nullable=False, server_default="12")
+
     # -------------------------------------------------------- service messages
     clean_join: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default=FALSE)
     clean_leave: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default=FALSE)
@@ -658,6 +662,9 @@ class BotSettings(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
     broadcast_enabled: Mapped[bool] = mapped_column(
         Boolean, default=True, nullable=False, server_default=TRUE)
+    # Used only for the completion report delivered in the bot's private chat.
+    broadcast_report_delete_after: Mapped[int] = mapped_column(
+        Integer, default=12, nullable=False, server_default="12")
     updated_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
 
