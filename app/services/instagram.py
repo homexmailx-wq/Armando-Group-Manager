@@ -75,12 +75,12 @@ def _input_media(path: Path, caption: str = ""):
     return InputMediaDocument(media=media, caption=caption or None, parse_mode=None)
 
 
-def _extractor_order(url: str) -> tuple[str, str]:
-    """Prefer the video-focused extractor for Reels; gallery-dl for posts."""
+def _extractor_order(url: str) -> tuple[str, str, str]:
+    """Prefer the video-focused extractor for Reels; keep parth-dl as a public fallback."""
     path = urlsplit(url).path.lower()
     if path.startswith(("/reel/", "/reels/", "/tv/")):
-        return "yt-dlp", "gallery-dl"
-    return "gallery-dl", "yt-dlp"
+        return "yt-dlp", "gallery-dl", "parth-dl"
+    return "gallery-dl", "yt-dlp", "parth-dl"
 
 
 def _classify_failure(detail: str, *, timed_out: bool = False) -> str:
@@ -89,6 +89,12 @@ def _classify_failure(detail: str, *, timed_out: bool = False) -> str:
     value = (detail or "").lower()
     if any(token in value for token in ("429", "too many requests", "rate limit", "rate-limit")):
         return "rate-limited"
+    if any(token in value for token in (
+        "isn't available to everyone", "is not available to everyone",
+        "can't be seen by certain audiences", "cannot be seen by certain audiences",
+        "audience restriction", "audience-restricted",
+    )):
+        return "audience-restricted"
     if any(token in value for token in ("private", "not found", "404", "no results", "unavailable")):
         return "unavailable"
     if any(token in value for token in (
@@ -185,6 +191,16 @@ def _build_command(extractor: str, output_dir: Path, url: str,
             "--merge-output-format", "mp4",
             "--output", str(output_dir / "%(id)s.%(ext)s"),
         ]
+    elif extractor == "parth-dl":
+        if cookies_path is not None:
+            raise ValueError("parth-dl fallback is intentionally anonymous-only")
+        # Use the package API under this same Python interpreter; the subprocess
+        # still receives only the sanitized temporary environment.
+        runner = (
+            "import sys; from parth_dl import download; "
+            "download(sys.argv[1], output_path=sys.argv[2], verbose=False)"
+        )
+        return [sys.executable, "-c", runner, url, str(output_dir)]
     else:
         raise ValueError(f"unsupported Instagram extractor: {extractor}")
 
@@ -244,7 +260,7 @@ async def _download_instagram_media(
     *,
     allow_operator_cookies: bool,
 ) -> tuple[list[Path], str, list[_ExtractorAttempt]]:
-    """Try a video/gallery extractor pair; retry once with owner cookies if gated."""
+    """Try anonymous extractors first; retry with owner cookies only for login walls."""
     env = _download_env(root)
     order = _extractor_order(url)
     attempts: list[_ExtractorAttempt] = []
@@ -257,15 +273,17 @@ async def _download_instagram_media(
         if attempt.category == "ok":
             return list(attempt.files), "ok", attempts
         _log_attempt(attempt)
-        # Another request will not help a hard rate limit or a clearly missing
-        # / private post; stop rather than increasing Instagram's throttle.
-        if attempt.category in {"rate-limited", "unavailable"}:
+        # Another request will not help a hard rate limit, an explicitly
+        # audience-restricted post, or a clearly missing/private post.
+        if attempt.category in {"rate-limited", "audience-restricted", "unavailable"}:
             break
 
     if (
         cookie_data is not None
         and any(attempt.category == "login-required" for attempt in attempts)
-        and not any(attempt.category in {"rate-limited", "unavailable"} for attempt in attempts)
+        and not any(attempt.category in {
+            "rate-limited", "audience-restricted", "unavailable",
+        } for attempt in attempts)
     ):
         cookie_path = _write_cookie_file(root, cookie_data)
         extractor = order[0]
@@ -279,7 +297,9 @@ async def _download_instagram_media(
     if attempts:
         # Prefer a clear auth/rate-limit explanation over a generic extractor error.
         categories = {attempt.category for attempt in attempts}
-        for category in ("rate-limited", "login-required", "unavailable", "timeout"):
+        for category in (
+            "rate-limited", "audience-restricted", "login-required", "unavailable", "timeout",
+        ):
             if category in categories:
                 return [], category, attempts
         return [], attempts[-1].category, attempts
@@ -325,6 +345,12 @@ async def handle_instagram_message(message: Message, bot: Bot) -> bool:
                     notice = (
                         "⏳ اینستاگرام دسترسی سرور را موقتاً محدود کرده است. "
                         "کمی بعد دوباره امتحان کنید؛ کوکی هم محدودیت نرخ را تضمینی رفع نمی‌کند."
+                    )
+                elif failure == "audience-restricted":
+                    notice = (
+                        "⚠️ اینستاگرام می‌گوید این محتوا برای همه قابل‌مشاهده نیست؛ "
+                        "ممکن است تنظیمات مخاطب، سن یا منطقه دخیل باشد. "
+                        "استخراج‌گر بی‌کوکیِ دیگری این محدودیت را تضمینی رفع نمی‌کند."
                     )
                 elif failure == "login-required":
                     notice = (
