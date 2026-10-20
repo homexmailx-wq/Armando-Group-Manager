@@ -256,8 +256,12 @@ class ChatSettings(Base, TimestampMixin):
     log_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, server_default=TRUE)
     log_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
+    # ai_enabled is for moderation analysis only. Chat conversation selection is
+    # independent and stored per group in ai_chat_model.
     ai_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default=FALSE)
     ai_threshold: Mapped[float] = mapped_column(Float, default=0.75, nullable=False)
+    ai_chat_model: Mapped[str] = mapped_column(
+        String(200), default="", nullable=False, server_default=text("''"))
 
     filter_default_action: Mapped[str] = mapped_column(String(24), default="delete", nullable=False)
     filter_default_mode: Mapped[str] = mapped_column(String(16), default="word", nullable=False)

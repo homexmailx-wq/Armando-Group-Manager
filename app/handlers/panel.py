@@ -7,6 +7,7 @@ Telegram and checks both the internal role and the real Telegram capability.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime
 
 from aiogram import Bot, F, Router
@@ -151,6 +152,22 @@ async def _prepare_ctx(session: AsyncSession, bot: Bot, chat_id: int, user_id: i
         "role_label": ROLE_LABELS.get(_role_key(actor), "👤 عضو") if actor else "👤 عضو",
         **extra,
     }
+    if section == "ai_chat":
+        from ..services.ai_gateway import (
+            AIGatewayError,
+            AIGatewayNotConfigured,
+            list_models,
+        )
+
+        try:
+            ctx["ai_models"] = await list_models()
+            ctx["ai_models_error"] = None
+        except AIGatewayNotConfigured:
+            ctx["ai_models"] = []
+            ctx["ai_models_error"] = "not_configured"
+        except AIGatewayError:
+            ctx["ai_models"] = []
+            ctx["ai_models_error"] = "unavailable"
     if section in {"locks", "lock", "security"}:
         ctx["locks"] = await lock_service.get_locks_map(session, chat_id)
     if section == "lock":
@@ -436,6 +453,88 @@ async def on_panel(callback: CallbackQuery, session: AsyncSession, bot: Bot) -> 
     section = parts[1] if len(parts) > 1 else "main"
     await safe_answer(callback)
     await _refresh(callback, session, bot, await _panel_chat_id(callback, session), section)
+
+
+@router.callback_query(F.data.startswith("aimodel:"))
+async def on_ai_model(callback: CallbackQuery, session: AsyncSession, bot: Bot) -> None:
+    """Live AI model picker; every mutation is restricted to group admins."""
+    from ..services.ai_gateway import (
+        AIGatewayError,
+        AIGatewayNotConfigured,
+        list_models,
+        model_ref,
+    )
+
+    parts = parse_cb(callback.data or "")
+    action = parts[1] if len(parts) > 1 else ""
+    chat_id = await _panel_chat_id(callback, session)
+    if not await _ensure_admin(callback, bot, chat_id, session):
+        return
+
+    if action == "page":
+        try:
+            page = max(0, min(int(parts[2]), 999))
+        except (IndexError, TypeError, ValueError):
+            page = 0
+        await safe_answer(callback)
+        await _refresh(callback, session, bot, chat_id, "ai_chat", ai_model_page=page)
+        return
+
+    if action == "refresh":
+        try:
+            await list_models(force_refresh=True)
+            answer = "✅ فهرست زندهٔ مدل‌ها تازه شد."
+        except AIGatewayNotConfigured:
+            answer = "⛔️ AI_CHAT_BASE_URL و AI_CHAT_API_KEY را در Railway تنظیم کنید."
+        except AIGatewayError:
+            answer = "⚠️ فهرست مدل‌ها دریافت نشد؛ کلید و دسترسی API را بررسی کنید."
+        await safe_answer(callback, answer, show_alert=answer.startswith(("⛔️", "⚠️")))
+        await _refresh(callback, session, bot, chat_id, "ai_chat", ai_model_page=0)
+        return
+
+    if action == "off":
+        settings_obj = await get_settings(session, chat_id)
+        settings_obj.ai_chat_model = ""
+        settings_obj.updated_at = datetime.utcnow()
+        invalidate_settings(chat_id)
+        await session.flush()
+        await safe_answer(callback, "✅ گفت‌وگوی هوشمند این گروه خاموش شد.")
+        await _refresh(callback, session, bot, chat_id, "ai_chat")
+        return
+
+    if action == "pick":
+        token = parts[2] if len(parts) > 2 else ""
+        if not re.fullmatch(r"[0-9a-f]{12}", token):
+            await safe_answer(callback, "⛔️ شناسهٔ مدل معتبر نیست؛ فهرست را تازه‌سازی کنید.", show_alert=True)
+            return
+        try:
+            models = await list_models()
+        except AIGatewayNotConfigured:
+            await safe_answer(callback, "⛔️ AI_CHAT_BASE_URL و AI_CHAT_API_KEY را در Railway تنظیم کنید.", show_alert=True)
+            return
+        except AIGatewayError:
+            await safe_answer(callback, "⚠️ فهرست مدل‌ها در دسترس نیست؛ دوباره تازه‌سازی کنید.", show_alert=True)
+            return
+        model = next((item for item in models if model_ref(item.id) == token), None)
+        if model is None:
+            await safe_answer(callback, "⚠️ این مدل دیگر در فهرست زنده نیست؛ فهرست را تازه‌سازی کنید.", show_alert=True)
+            return
+        settings_obj = await get_settings(session, chat_id)
+        settings_obj.ai_chat_model = model.id
+        settings_obj.updated_at = datetime.utcnow()
+        invalidate_settings(chat_id)
+        await session.flush()
+        if model.pricing == "free":
+            answer = "✅ مدل رایگان برای این گروه انتخاب شد."
+        elif model.pricing == "paid":
+            answer = "✅ مدل پریمیوم انتخاب شد؛ استفاده از آن ممکن است هزینه داشته باشد."
+        else:
+            answer = "⚠️ مدل انتخاب شد، اما API قیمت را مشخص نکرده است؛ رایگان بودن آن تأیید نشده."
+        await safe_answer(callback, answer, show_alert=(model.pricing != "free"))
+        await _refresh(callback, session, bot, chat_id, "ai_chat")
+        return
+
+    await safe_answer(callback)
 
 
 @router.callback_query(F.data.startswith("lockpage:"))

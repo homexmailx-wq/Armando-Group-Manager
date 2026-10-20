@@ -1,0 +1,4 @@
+# Development and test tools only; not included in the Railway runtime ZIP.
+-r requirements.txt
+pytest==8.3.4
+pytest-asyncio==0.25.0

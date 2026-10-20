@@ -98,6 +98,15 @@ async def _migration_9(engine: AsyncEngine) -> None:
 
 MIGRATIONS[9] = _migration_9
 
+
+async def _migration_10(engine: AsyncEngine) -> None:
+    """Store the independent per-group AI chat model selection."""
+    await add_column(engine, "chat_settings", "ai_chat_model",
+                     "VARCHAR(200) NOT NULL DEFAULT ''")
+
+
+MIGRATIONS[10] = _migration_10
+
 CURRENT_VERSION = max(MIGRATIONS) if MIGRATIONS else 0
 
 

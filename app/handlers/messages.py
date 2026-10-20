@@ -275,7 +275,8 @@ async def on_group_message(message: Message, session: AsyncSession, bot: Bot) ->
         return
     from ..services.ai_chat import handle_ai_message
 
-    if await handle_ai_message(message, bot):
+    if await handle_ai_message(message, bot,
+                                selected_model=settings.get("ai_chat_model") or None):
         return
 
     # ------------------------------------------------------- content triggers

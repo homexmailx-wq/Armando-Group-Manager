@@ -86,11 +86,12 @@ SECTIONS: dict[str, tuple[str, str, str]] = {
     "disabled": ("🚫 بخش‌های غیرفعال", "admin", "settings"),
     "tags": ("🏷 تگ‌ها", "admin", "settings"),
     "rules": ("📜 قوانین", "admin", "settings"),
+    "ai_chat": ("💬 گفت‌وگوی هوشمند", "admin", "settings"),
 }
 
 MAIN_ORDER = ["users", "security", "locks", "filters", "welcome", "messages",
               "stats", "members", "fun", "settings", "help"]
-SETTINGS_ORDER = ["security", "locks", "filters", "welcome", "warnings", "captcha",
+SETTINGS_ORDER = ["security", "ai_chat", "locks", "filters", "welcome", "warnings", "captcha",
                   "antispam", "raid", "night", "tags", "rules", "reports", "staff",
                   "trust", "logs", "schedule", "federation", "backup", "disabled"]
 
@@ -222,7 +223,7 @@ def _panel_security(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
         state_text("ضدپورن", porn_enabled),
         state_text("ضد Raid", bool(settings.get("antiraid_enabled"))),
         state_text("CAPTCHA", bool(settings.get("captcha_enabled"))),
-        state_text("تحلیل هوش مصنوعی", bool(settings.get("ai_enabled"))),
+        state_text("تحلیل هوشمند پیام‌ها", bool(settings.get("ai_enabled"))),
         state_text("حالت شب", bool(settings.get("night_mode_enabled"))),
     ])
     panel = "security"
@@ -233,8 +234,9 @@ def _panel_security(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
          toggle_button("🔞 ضدپورن", "anti_porn_enabled", porn_enabled, panel)],
         [toggle_button("🛡 ضد Raid", "antiraid_enabled", bool(settings.get("antiraid_enabled")), panel),
          toggle_button("🤖 CAPTCHA", "captcha_enabled", bool(settings.get("captcha_enabled")), panel)],
-        [toggle_button("🧠 هوش مصنوعی", "ai_enabled", bool(settings.get("ai_enabled")), panel),
+        [toggle_button("🧠 تحلیل هوشمند پیام‌ها", "ai_enabled", bool(settings.get("ai_enabled")), panel),
          toggle_button("🌙 حالت شب", "night_mode_enabled", bool(settings.get("night_mode_enabled")), panel)],
+        [primary("💬 گفت‌وگوی هوشمند", cb("panel", "ai_chat"))],
         [primary("🌊 تنظیمات ضدفلاود", cb("panel", "antispam")),
          primary("⚠️ تنظیمات اخطار", cb("panel", "warnings"))],
         [primary("🤖 تنظیمات کپچا", cb("panel", "captcha")),
@@ -734,6 +736,86 @@ def _panel_fun(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
     return text, keyboard
 
 
+def _panel_ai_chat(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
+    import html
+    import math
+
+    from ..services.ai_gateway import model_ref
+
+    settings = ctx.get("settings") or {}
+    selected = str(settings.get("ai_chat_model") or "")
+    models = list(ctx.get("ai_models") or [])
+    error = ctx.get("ai_models_error")
+    page_size = 6
+    page_count = max(1, math.ceil(len(models) / page_size))
+    try:
+        page = max(0, min(int(ctx.get("ai_model_page", 0)), page_count - 1))
+    except (TypeError, ValueError):
+        page = 0
+
+    current_model = next((model for model in models if model.id == selected), None)
+    lines = ["💬 <b>گفت‌وگوی هوشمند گروه</b>", ""]
+    if selected:
+        current_name = current_model.name if current_model else selected
+        current_price = current_model.price_label if current_model else "❔ خارج از فهرست فعلی API"
+        lines.extend([
+            f"مدل فعلی: <b>{html.escape(str(current_name))}</b> — {current_price}",
+            f"شناسهٔ مدل: <code>{html.escape(selected)}</code>",
+        ])
+    else:
+        lines.append("مدلی برای این گروه انتخاب نشده است.")
+
+    lines.extend([
+        "",
+        "شروع: پیام را با «آرماندو» آغاز کنید؛ نمونه: <code>آرماندو سلام، امروز چه خبر؟</code>",
+        "ادامه: هر عضو گروه می‌تواند روی پاسخ آرماندو ریپلای کند و پرسش بعدی را بنویسد؛ گفت‌وگو برای همهٔ اعضا مشترک است.",
+        "مدیران گروه مدل را جداگانه انتخاب می‌کنند. مدل‌های پریمیوم ممکن است هزینه داشته باشند؛ وضعیت قیمت (رایگان، پریمیوم یا نامشخص) از دادهٔ زندهٔ API خوانده می‌شود.",
+    ])
+
+    if error == "not_configured":
+        lines.extend(["", "⛔️ مدیر ربات باید <code>AI_CHAT_BASE_URL</code> و <code>AI_CHAT_API_KEY</code> را در Railway تنظیم کند؛ مقدار کلید را Secret بگذارد."])
+    elif error:
+        lines.extend(["", "⚠️ فهرست مدل‌ها از ارائه‌دهندهٔ API دریافت نشد. کلید و دسترسی API را در Railway بررسی و سپس تازه‌سازی کنید."])
+    elif models:
+        lines.extend(["", f"<b>مدل‌های در دسترس ({len(models)}):</b>"])
+        start = page * page_size
+        for model in models[start:start + page_size]:
+            marker = "✅" if model.id == selected else "•"
+            lines.append(
+                f"{marker} <b>{html.escape(str(model.name)[:80])}</b> — {model.price_label}\n"
+                f"   <code>{html.escape(str(model.id)[:180])}</code>"
+            )
+        lines.append(f"صفحهٔ {to_persian_digits(str(page + 1))} از {to_persian_digits(str(page_count))}")
+    else:
+        lines.extend(["", "در فهرست زنده مدلی برای نمایش نیست."])
+
+    rows: list[list[Any]] = []
+    if models:
+        start = page * page_size
+        model_buttons = []
+        status_icon = {"free": "🆓", "paid": "💳", "unknown": "❔"}
+        for model in models[start:start + page_size]:
+            name = str(model.name).strip() or model.id
+            if len(name) > 34:
+                name = name[:33].rstrip() + "…"
+            prefix = "✅ " if model.id == selected else status_icon.get(model.pricing, "❔ ") + " "
+            model_buttons.append(primary(prefix + name, cb("aimodel", "pick", model_ref(model.id))))
+        rows.extend(grid(model_buttons, per_row=1))
+        pagination = []
+        if page > 0:
+            pagination.append(primary("⬅️ مدل‌های قبلی", cb("aimodel", "page", page - 1)))
+        if page + 1 < page_count:
+            pagination.append(primary("مدل‌های بعدی ➡️", cb("aimodel", "page", page + 1)))
+        if pagination:
+            rows.append(pagination)
+
+    rows.append([primary("🔄 تازه‌سازی فهرست مدل‌ها", cb("aimodel", "refresh"))])
+    if selected:
+        rows.append([danger("⏹ خاموش کردن گفت‌وگوی گروه", cb("aimodel", "off"))])
+    rows.append([primary("⬅️ بازگشت به تنظیمات", cb("panel", "settings")), home()])
+    return "\n".join(lines), markup(rows)
+
+
 def _panel_settings(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
     level = ctx.get("level", 0)
     text = "\n".join([
@@ -1010,6 +1092,7 @@ PANEL_BUILDERS: dict[str, Callable[[dict], tuple[str, InlineKeyboardMarkup]]] = 
     "members": _panel_members,
     "fun": _panel_fun,
     "settings": _panel_settings,
+    "ai_chat": _panel_ai_chat,
     "help": _panel_help,
     "profile": _panel_profile,
     "warnings": _panel_warnings,
@@ -1151,7 +1234,7 @@ def help_text(topic: str) -> str:
             "• <code>تنظیم عنوان نام جدید</code> / <code>تنظیم توضیحات متن</code>",
             "• <code>بکاپ</code> / <code>آیدی</code> / <code>تاریخ</code> / <code>ساعت</code>",
             "• ارسال پیوند مستقلِ پست/ریل عمومی اینستاگرام برای دریافت رسانه.",
-            "• <code>آرماندو بگو پرسش</code> — گفت‌وگوی Gemini، در صورت فعال‌سازی مالک ربات.",
+            "• <code>آرماندو پرسش</code> — گفت‌وگوی هوشمند گروهی؛ ادامه با ریپلای به پاسخ آرماندو.",
         ]),
         "owner": "\n".join([
             "🌍 <b>دستورهای مالک ربات</b>", "",
