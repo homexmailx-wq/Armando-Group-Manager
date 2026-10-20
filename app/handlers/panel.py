@@ -524,13 +524,7 @@ async def on_ai_model(callback: CallbackQuery, session: AsyncSession, bot: Bot) 
         settings_obj.updated_at = datetime.utcnow()
         invalidate_settings(chat_id)
         await session.flush()
-        if model.pricing == "free":
-            answer = "✅ مدل رایگان برای این گروه انتخاب شد."
-        elif model.pricing == "paid":
-            answer = "✅ مدل پریمیوم انتخاب شد؛ استفاده از آن ممکن است هزینه داشته باشد."
-        else:
-            answer = "⚠️ مدل انتخاب شد، اما API قیمت را مشخص نکرده است؛ رایگان بودن آن تأیید نشده."
-        await safe_answer(callback, answer, show_alert=(model.pricing != "free"))
+        await safe_answer(callback, "✅ مدل برای این گروه انتخاب شد.")
         await _refresh(callback, session, bot, chat_id, "ai_chat")
         return
 

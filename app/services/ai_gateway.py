@@ -1,7 +1,7 @@
 """Generic OpenAI-compatible model discovery and chat transport.
 
-Model IDs and pricing are read from the authenticated live catalog; no model or
-price roster is embedded in the application.
+Model IDs and display names are read from the authenticated live catalog; no
+model roster is embedded in the application.
 """
 
 from __future__ import annotations
@@ -12,8 +12,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
-from typing import Any, Literal
+from typing import Any
 
 from .. import config
 from .market import get_http_session
@@ -38,15 +37,6 @@ class AIGatewayNotConfigured(AIGatewayError):
 class AIModel:
     id: str
     name: str
-    pricing: Literal["free", "paid", "unknown"]
-
-    @property
-    def price_label(self) -> str:
-        return {
-            "free": "🆓 رایگان",
-            "paid": "💳 پریمیوم",
-            "unknown": "❔ قیمت نامشخص",
-        }[self.pricing]
 
 
 def model_ref(model_id: str) -> str:
@@ -74,123 +64,8 @@ def _base_url() -> str:
     return base
 
 
-def _is_true(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return value != 0
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "free", "on"}
-    return False
-
-
-def _decimal(value: Any) -> Decimal | None:
-    if isinstance(value, bool) or value is None:
-        return None
-    try:
-        candidate = Decimal(str(value).strip().replace(",", ""))
-    except (InvalidOperation, ValueError, TypeError):
-        # Accept common display forms such as "$0.12 / 1M tokens" while still
-        # extracting only a leading numeric rate, never a marketing claim.
-        match = re.match(r"\s*\$?\s*(-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)", str(value))
-        if not match:
-            return None
-        try:
-            candidate = Decimal(match.group(1))
-        except InvalidOperation:
-            return None
-    if not candidate.is_finite() or candidate < 0:
-        return None
-    return candidate
-
-
-_INPUT_PRICE_KEYS = (
-    "input", "prompt", "input_price", "prompt_price", "input_cost",
-    "prompt_cost", "input_rate", "input_price_usd", "prompt_price_usd",
-    "input_per_token", "prompt_per_token", "input_per_million",
-    "input_per_1m", "input_per_million_tokens", "input_price_per_million",
-    "input_price_per_1m", "input_price_per_million_tokens", "input_price_per_1m_tokens",
-    "prompt_price_per_million", "prompt_price_per_1m", "prompt_price_per_million_tokens",
-    "input_cost_per_million", "input_cost_per_1m", "input_cost_per_1m_tokens",
-    "input_token_price", "prompt_token_price", "price_input", "inputPrice", "promptPrice",
-    "inputPricePerMTok", "promptPricePerMTok",
-)
-_OUTPUT_PRICE_KEYS = (
-    "output", "completion", "output_price", "completion_price", "output_cost",
-    "completion_cost", "output_rate", "output_price_usd", "completion_price_usd",
-    "output_per_token", "completion_per_token", "output_per_million",
-    "output_per_1m", "output_per_million_tokens", "output_price_per_million",
-    "output_price_per_1m", "output_price_per_million_tokens", "output_price_per_1m_tokens",
-    "completion_price_per_million", "completion_price_per_1m", "completion_price_per_million_tokens",
-    "output_cost_per_million", "output_cost_per_1m", "output_cost_per_1m_tokens",
-    "output_token_price", "completion_token_price", "price_output", "outputPrice", "completionPrice",
-    "outputPricePerMTok", "completionPricePerMTok",
-)
-
-
-def _pricing_sources(raw: dict[str, Any]) -> list[dict[str, Any]]:
-    sources = [raw]
-    for key in ("pricing", "price", "prices", "cost", "costs", "pricing_info"):
-        value = raw.get(key)
-        if isinstance(value, dict):
-            sources.append(value)
-        elif isinstance(value, list):
-            sources.extend(item for item in value if isinstance(item, dict))
-    return sources
-
-
-def _find_price(sources: list[dict[str, Any]], keys: tuple[str, ...]) -> Decimal | None:
-    wanted = {key.casefold() for key in keys}
-    for source in sources:
-        for key, value in source.items():
-            if str(key).casefold() not in wanted:
-                continue
-            result = _decimal(value)
-            if result is not None:
-                return result
-    return None
-
-
-def _explicit_free(raw: dict[str, Any]) -> bool:
-    """Read an explicit boolean from the live API, never infer from model slug/name."""
-    for source in _pricing_sources(raw):
-        for key in ("is_free", "free", "free_tier", "isFree", "freeTier"):
-            if key in source and _is_true(source.get(key)):
-                return True
-    return False
-
-
-def _observed_prices(sources: list[dict[str, Any]]) -> list[Decimal]:
-    """Return numeric rates explicitly exposed by API pricing objects."""
-    exact_price_keys = {
-        "input", "output", "prompt", "completion", "request", "image", "audio",
-        "video", "reasoning", "cache", "cache_read", "cache_write", "input_cache_read",
-        "input_cache_write", "prompt_cache_read", "prompt_cache_write",
-    }
-    values: list[Decimal] = []
-
-    def collect(value: Any) -> None:
-        if isinstance(value, dict):
-            for nested in value.values():
-                collect(nested)
-        elif isinstance(value, list):
-            for nested in value:
-                collect(nested)
-        else:
-            number = _decimal(value)
-            if number is not None:
-                values.append(number)
-
-    for source in sources:  # only fields that look like prices are read from model metadata
-        for key, value in source.items():
-            normalized = re.sub(r"[^a-z0-9]+", "_", str(key).casefold()).strip("_")
-            if (normalized in exact_price_keys or "price" in normalized
-                    or "cost" in normalized or "rate" in normalized):
-                collect(value)
-    return values
-
-
 def _model_from_api(raw: Any) -> AIModel | None:
+    """Take only the model ID and display name supplied by the provider."""
     if not isinstance(raw, dict):
         return None
     model_id = raw.get("id") or raw.get("model") or raw.get("model_id")
@@ -201,22 +76,7 @@ def _model_from_api(raw: Any) -> AIModel | None:
         return None
     name = raw.get("name") or raw.get("display_name") or raw.get("displayName") or model_id
     name = str(name).strip()[:200] or model_id
-
-    sources = _pricing_sources(raw)
-    input_price = _find_price(sources, _INPUT_PRICE_KEYS)
-    output_price = _find_price(sources, _OUTPUT_PRICE_KEYS)
-    observed_prices = _observed_prices(sources)
-    if (any(value > 0 for value in observed_prices)
-            or (input_price is not None and input_price > 0)
-            or (output_price is not None and output_price > 0)):
-        price_class: Literal["free", "paid", "unknown"] = "paid"
-    elif input_price == 0 and output_price == 0:
-        price_class = "free"
-    elif _explicit_free(raw):
-        price_class = "free"
-    else:
-        price_class = "unknown"
-    return AIModel(id=model_id, name=name, pricing=price_class)
+    return AIModel(id=model_id, name=name)
 
 
 def _model_items(payload: Any) -> list[Any]:
@@ -235,9 +95,37 @@ def _model_items(payload: Any) -> list[Any]:
     return []
 
 
-def _sort_models(models: list[AIModel]) -> list[AIModel]:
-    order = {"free": 0, "paid": 1, "unknown": 2}
-    return sorted(models, key=lambda model: (order[model.pricing], model.name.casefold(), model.id.casefold()))
+def _safe_error_detail(payload: Any, api_key: str) -> str:
+    """Extract a short provider diagnostic while redacting credentials."""
+    if not isinstance(payload, dict):
+        return ""
+    error = payload.get("error")
+    if isinstance(error, dict):
+        fields = [error.get(name) for name in ("code", "type", "message")]
+    elif isinstance(error, str):
+        fields = [error]
+    else:
+        fields = [payload.get(name) for name in ("code", "type", "message")]
+    detail = " | ".join(str(value) for value in fields if isinstance(value, (str, int, float)))
+    detail = " ".join(detail.split())
+    if api_key:
+        detail = detail.replace(api_key, "[REDACTED]")
+    detail = re.sub(r"(?i)\b(?:sk-|tr_)[a-z0-9_-]{8,}\b", "[REDACTED]", detail)
+    return detail[:300]
+
+
+async def _response_error_detail(response: Any, api_key: str) -> str:
+    try:
+        payload = await response.json(content_type=None)
+    except Exception:  # noqa: BLE001 - diagnostic data is optional
+        payload = None
+    detail = _safe_error_detail(payload, api_key)
+    if detail:
+        return detail
+    reason = " ".join(str(getattr(response, "reason", "") or "").split())
+    if api_key:
+        reason = reason.replace(api_key, "[REDACTED]")
+    return reason[:160]
 
 
 async def list_models(*, force_refresh: bool = False) -> list[AIModel]:
@@ -266,7 +154,9 @@ async def list_models(*, force_refresh: bool = False) -> list[AIModel]:
                 timeout=timeout,
             ) as response:
                 if response.status >= 400:
-                    logger.warning("AI provider model catalog returned HTTP %s", response.status)
+                    detail = await _response_error_detail(response, api_key)
+                    suffix = f" ({detail})" if detail else ""
+                    logger.warning("AI provider model catalog returned HTTP %s%s", response.status, suffix)
                     raise AIGatewayError(f"model catalog HTTP {response.status}")
                 payload = await response.json(content_type=None)
         except AIGatewayError:
@@ -286,7 +176,7 @@ async def list_models(*, force_refresh: bool = False) -> list[AIModel]:
         if not models:
             logger.warning("AI provider model catalog returned no valid models")
             raise AIGatewayError("empty model catalog")
-        _cached_models = _sort_models(models)
+        _cached_models = models
         _cached_at = time.monotonic()
         return list(_cached_models)
 
@@ -333,7 +223,9 @@ async def chat_completion(model: str, messages: list[dict[str, str]], *,
             timeout=timeout,
         ) as response:
             if response.status >= 400:
-                logger.warning("AI provider completion returned HTTP %s", response.status)
+                detail = await _response_error_detail(response, api_key)
+                suffix = f" ({detail})" if detail else ""
+                logger.warning("AI provider completion returned HTTP %s%s", response.status, suffix)
                 raise AIGatewayError(f"completion HTTP {response.status}")
             data = await response.json(content_type=None)
     except AIGatewayError:

@@ -757,9 +757,8 @@ def _panel_ai_chat(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
     lines = ["💬 <b>گفت‌وگوی هوشمند گروه</b>", ""]
     if selected:
         current_name = current_model.name if current_model else selected
-        current_price = current_model.price_label if current_model else "❔ خارج از فهرست فعلی API"
         lines.extend([
-            f"مدل فعلی: <b>{html.escape(str(current_name))}</b> — {current_price}",
+            f"مدل فعلی: <b>{html.escape(str(current_name))}</b>",
             f"شناسهٔ مدل: <code>{html.escape(selected)}</code>",
         ])
     else:
@@ -769,7 +768,7 @@ def _panel_ai_chat(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
         "",
         "شروع: پیام را با «آرماندو» آغاز کنید؛ نمونه: <code>آرماندو سلام، امروز چه خبر؟</code>",
         "ادامه: هر عضو گروه می‌تواند روی پاسخ آرماندو ریپلای کند و پرسش بعدی را بنویسد؛ گفت‌وگو برای همهٔ اعضا مشترک است.",
-        "مدیران گروه مدل را جداگانه انتخاب می‌کنند. مدل‌های پریمیوم ممکن است هزینه داشته باشند؛ وضعیت قیمت (رایگان، پریمیوم یا نامشخص) از دادهٔ زندهٔ API خوانده می‌شود.",
+        "مدیران گروه مدل را از فهرست زندهٔ API انتخاب می‌کنند؛ فهرست مدل‌ها برای هر گروه جداگانه تنظیم می‌شود.",
     ])
 
     if error == "not_configured":
@@ -782,7 +781,7 @@ def _panel_ai_chat(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
         for model in models[start:start + page_size]:
             marker = "✅" if model.id == selected else "•"
             lines.append(
-                f"{marker} <b>{html.escape(str(model.name)[:80])}</b> — {model.price_label}\n"
+                f"{marker} <b>{html.escape(str(model.name)[:80])}</b>\n"
                 f"   <code>{html.escape(str(model.id)[:180])}</code>"
             )
         lines.append(f"صفحهٔ {to_persian_digits(str(page + 1))} از {to_persian_digits(str(page_count))}")
@@ -793,12 +792,11 @@ def _panel_ai_chat(ctx: dict) -> tuple[str, InlineKeyboardMarkup]:
     if models:
         start = page * page_size
         model_buttons = []
-        status_icon = {"free": "🆓", "paid": "💳", "unknown": "❔"}
         for model in models[start:start + page_size]:
             name = str(model.name).strip() or model.id
             if len(name) > 34:
                 name = name[:33].rstrip() + "…"
-            prefix = "✅ " if model.id == selected else status_icon.get(model.pricing, "❔ ") + " "
+            prefix = "✅ " if model.id == selected else "• "
             model_buttons.append(primary(prefix + name, cb("aimodel", "pick", model_ref(model.id))))
         rows.extend(grid(model_buttons, per_row=1))
         pagination = []
