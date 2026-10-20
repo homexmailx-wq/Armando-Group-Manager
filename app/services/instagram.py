@@ -1,4 +1,4 @@
-"""Download Instagram media with public extractors and authorized owner-only retries."""
+"""Download Instagram media with public extractors and authorized group/owner retries."""
 
 from __future__ import annotations
 
@@ -52,6 +52,7 @@ class _ExtractorAttempt:
     category: str
     detail: str
     files: tuple[Path, ...]
+    operator_session: bool = False
 
 
 def extract_public_instagram_url(text: str) -> str | None:
@@ -206,7 +207,7 @@ def _cookie_file_bytes() -> bytes | None:
 
 
 def _is_owner_private_chat(message: Message) -> bool:
-    """Never expose an operator-owned Instagram session to public bot users."""
+    """Allow the operator's session in the operator's own private chat."""
     from .. import config
 
     actor = message.from_user
@@ -217,6 +218,21 @@ def _is_owner_private_chat(message: Message) -> bool:
         and actor.id == owner_id
         and message.chat.type == "private"
     )
+
+
+def _cookie_retry_allowed(message: Message) -> bool:
+    """Allow private owner retries and human requests in chats accepted by middleware."""
+    from .. import config
+
+    if not config.settings.owner_id:
+        return False
+    actor = message.from_user
+    if actor is None or getattr(actor, "is_bot", False):
+        return False
+    if message.chat.type in {"group", "supergroup"}:
+        # GroupApprovalMiddleware blocks unapproved chats when that gate is enabled.
+        return True
+    return _is_owner_private_chat(message)
 
 
 def _write_cookie_file(root: Path, data: bytes) -> Path:
@@ -295,22 +311,27 @@ async def _run_extractor(extractor: str, url: str, output_dir: Path,
             pass
         stdout, stderr = await process.communicate()
         detail = _safe_diagnostic(stderr or stdout, fallback="مهلت دریافت به پایان رسید")
-        return _ExtractorAttempt(extractor, process.returncode, "timeout", detail, ())
+        return _ExtractorAttempt(
+            extractor, process.returncode, "timeout", detail, (), cookies_path is not None)
 
     files = tuple(_media_file_list(output_dir))
     detail = _safe_diagnostic(stderr or stdout)
     if process.returncode == 0 and files:
-        return _ExtractorAttempt(extractor, process.returncode, "ok", detail, files)
+        return _ExtractorAttempt(
+            extractor, process.returncode, "ok", detail, files, cookies_path is not None)
     if process.returncode == 0 and not detail:
         detail = "استخراج‌گر بدون فایل رسانه پایان یافت"
     category = _classify_failure(detail)
-    return _ExtractorAttempt(extractor, process.returncode, category, detail, files)
+    return _ExtractorAttempt(
+        extractor, process.returncode, category, detail, files, cookies_path is not None)
 
 
 def _log_attempt(attempt: _ExtractorAttempt) -> None:
+    session_mode = "نشست مالک" if attempt.operator_session else "بی‌کوکی"
     logger.warning(
-        "استخراج‌گر اینستاگرام %s ناموفق بود؛ کد=%s، علت=%s، جزئیات=%s",
+        "استخراج‌گر اینستاگرام %s ناموفق بود؛ حالت=%s، کد=%s، علت=%s، جزئیات=%s",
         attempt.extractor,
+        session_mode,
         attempt.return_code,
         attempt.category,
         attempt.detail or "بدون توضیح از استخراج‌گر",
@@ -345,9 +366,17 @@ async def _download_instagram_media(
                        for attempt in attempts)
     hard_blocked = any(attempt.category in {"rate-limited", "unavailable"}
                        for attempt in attempts)
-    if allow_operator_cookies and access_gated and not hard_blocked:
+    if access_gated and hard_blocked:
+        logger.info("نشست مالک برای این پیوند استفاده نشد؛ نتیجه شامل محدودیت نرخ یا محتوای ناموجود است.")
+    elif access_gated and not allow_operator_cookies:
+        logger.info("نشست مالک برای این درخواست مجاز نبود؛ چت خصوصی مالک یا گروه مجاز لازم است.")
+    elif access_gated:
         cookie_data = _cookie_file_bytes()
-        if cookie_data is not None:
+        if cookie_data is None:
+            logger.warning(
+                "نشست مالک بارگذاری نشد؛ متغیر INSTAGRAM_COOKIES_B64 تنظیم نشده یا فایل Netscape معتبر نیست.")
+        else:
+            logger.info("تلاش دوبارهٔ اینستاگرام با نشست مالک آغاز شد؛ مقادیر کوکی ثبت نمی‌شوند.")
             cookie_path = _write_cookie_file(root, cookie_data)
             # Both established extractors get a chance with the same authorized
             # session. parth-dl is deliberately anonymous-only.
@@ -359,6 +388,7 @@ async def _download_instagram_media(
                     env, cookie_path)
                 attempts.append(attempt)
                 if attempt.category == "ok":
+                    logger.info("اینستاگرام با استخراج‌گر %s و نشست مالک دریافت شد.", extractor)
                     return list(attempt.files), "ok", attempts
                 _log_attempt(attempt)
                 if attempt.category == "rate-limited":
@@ -408,9 +438,10 @@ async def handle_instagram_message(message: Message, bot: Bot) -> bool:
     try:
         with tempfile.TemporaryDirectory(prefix="armando-instagram-") as tmp:
             root = Path(tmp)
+            cookie_retry_allowed = _cookie_retry_allowed(message)
             async with _DOWNLOAD_SEMAPHORE:
-                files, failure, _attempts = await _download_instagram_media(
-                    url, root, allow_operator_cookies=_is_owner_private_chat(message))
+                files, failure, attempts = await _download_instagram_media(
+                    url, root, allow_operator_cookies=cookie_retry_allowed)
             if not files:
                 if failure == "rate-limited":
                     notice = (
@@ -418,12 +449,31 @@ async def handle_instagram_message(message: Message, bot: Bot) -> bool:
                         "کمی بعد دوباره امتحان کنید؛ کوکی هم محدودیت نرخ را تضمینی رفع نمی‌کند."
                     )
                 elif failure == "audience-restricted":
-                    notice = (
-                        "⚠️ اینستاگرام دسترسی این محتوا را بر اساس مخاطب، سن یا منطقه محدود کرده است. "
-                        "فقط حسابی که مجاز به دیدن پست است می‌تواند کمک کند؛ نشست امنِ تنظیم‌شدهٔ مالک "
-                        "ربات فقط در گفت‌وگوی خصوصی همان مالک استفاده می‌شود. این محدودیت را نمی‌توان "
-                        "به‌طور تضمینی دور زد."
-                    )
+                    owner_session_attempted = any(attempt.operator_session for attempt in attempts)
+                    hard_blocked = any(
+                        attempt.category in {"rate-limited", "unavailable"} for attempt in attempts)
+                    if owner_session_attempted:
+                        notice = (
+                            "⚠️ نشست اینستاگرامِ مالک امتحان شد، اما اینستاگرام هنوز دسترسی این پست را رد می‌کند. "
+                            "حسابِ کوکی باید خودش همان پست را ببیند؛ ممکن است نشست نامعتبر باشد یا سرور "
+                            "Railway پذیرفته نشود. محدودیت واقعی مخاطب را نمی‌توان تضمینی رفع کرد."
+                        )
+                    elif hard_blocked:
+                        notice = (
+                            "⚠️ اینستاگرام دسترسی را محدود کرد و به‌دلیل پاسخِ نرخ‌محدود/ناموجود، تلاش با کوکی "
+                            "عمداً انجام نشد. کمی بعد یا با پیوندی که حساب مجاز می‌بیند امتحان کنید."
+                        )
+                    elif cookie_retry_allowed:
+                        notice = (
+                            "⚠️ اینستاگرام دسترسی این پست را محدود کرده است؛ نشست مالک در این درخواست "
+                            "بارگذاری نشد. مدیر ربات متغیر INSTAGRAM_COOKIES_B64 را در محیط Production "
+                            "و استقرار آخر بررسی کند."
+                        )
+                    else:
+                        notice = (
+                            "⚠️ اینستاگرام دسترسی این پست را محدود کرده است و نشست مالک برای این گفت‌وگو "
+                            "مجاز نبود. در گروه مجاز بات یا گفت‌وگوی خصوصی مالک امتحان کنید."
+                        )
                 elif failure == "login-required":
                     notice = (
                         "🔒 اینستاگرام برای این پیوند ورود یا نشست معتبر خواسته است. "
