@@ -55,7 +55,23 @@ def model_ref(model_id: str) -> str:
 
 
 def _base_url() -> str:
-    return (config.settings.ai_chat_base_url or "").strip().rstrip("/")
+    """Normalize an OpenAI-compatible API origin for raw HTTP requests.
+
+    SDK examples often accept the bare host and add ``/v1`` internally. This
+    service sends HTTP requests directly, so add ``/v1`` when the configured
+    URL is only an origin. Explicit API prefixes (for example ``/v1`` or
+    ``/openai/v1``) are preserved as supplied.
+    """
+    base = (config.settings.ai_chat_base_url or "").strip().rstrip("/")
+    if not base:
+        return ""
+    from urllib.parse import urlsplit
+
+    parsed = urlsplit(base)
+    if (parsed.scheme in {"http", "https"} and parsed.netloc
+            and parsed.path in {"", "/"} and not parsed.query and not parsed.fragment):
+        return f"{base}/v1"
+    return base
 
 
 def _is_true(value: Any) -> bool:
