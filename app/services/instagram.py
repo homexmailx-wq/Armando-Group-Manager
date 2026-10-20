@@ -1,4 +1,4 @@
-"""Download public Instagram post/reel media using open-source extractors."""
+"""Download Instagram media with public extractors and authorized owner-only retries."""
 
 from __future__ import annotations
 
@@ -30,10 +30,13 @@ _PUBLIC_POST_RE = re.compile(
 _MEDIA_EXTENSIONS = {
     ".jpg", ".jpeg", ".png", ".webp", ".mp4", ".m4v", ".mov", ".webm", ".mkv",
 }
-_MAX_FILES = 10
+# Instagram carousels may contain more than one Telegram media-group batch.
+_MAX_FILES = 20
+_ALBUM_BATCH_SIZE = 10
 _MAX_TOTAL_BYTES = 48 * 1024 * 1024
 _DOWNLOAD_TIMEOUT = 55
 _DOWNLOAD_COOLDOWN = 10.0
+_DOWNLOAD_SEMAPHORE = asyncio.Semaphore(3)
 _last_download: dict[int, float] = {}
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
@@ -62,7 +65,17 @@ def extract_public_instagram_url(text: str) -> str | None:
 def _media_file_list(root: Path) -> list[Path]:
     files = [path for path in root.rglob("*")
              if path.is_file() and path.suffix.lower() in _MEDIA_EXTENSIONS]
-    return sorted(files, key=lambda path: path.as_posix())[:_MAX_FILES]
+
+    def natural_key(path: Path) -> tuple[tuple[int, int | str], ...]:
+        parts = re.split(r"(\d+)", path.relative_to(root).as_posix())
+        return tuple((0, int(part)) if part.isdigit() else (1, part.casefold())
+                     for part in parts)
+
+    files.sort(key=natural_key)
+    if len(files) > _MAX_FILES:
+        logger.warning("اینستاگرام %s فایل رسانه برگرداند؛ فقط %s فایل نخست پردازش می‌شود.",
+                       len(files), _MAX_FILES)
+    return files[:_MAX_FILES]
 
 
 def _input_media(path: Path, caption: str = ""):
@@ -73,6 +86,56 @@ def _input_media(path: Path, caption: str = ""):
     if ext == ".mp4":
         return InputMediaVideo(media=media, caption=caption or None, parse_mode=None)
     return InputMediaDocument(media=media, caption=caption or None, parse_mode=None)
+
+
+async def _send_single_media(bot: Bot, message: Message, path: Path, caption: str,
+                             *, force_document: bool = False) -> None:
+    common = {
+        "chat_id": message.chat.id,
+        "caption": caption or None,
+        "reply_to_message_id": message.message_id,
+        "parse_mode": None,
+    }
+    media = FSInputFile(path)
+    ext = path.suffix.lower()
+    if not force_document and ext in {".jpg", ".jpeg", ".png"}:
+        await bot.send_photo(photo=media, **common)
+    elif not force_document and ext == ".mp4":
+        await bot.send_video(video=media, **common)
+    else:
+        await bot.send_document(document=media, **common)
+
+
+async def _send_media_batches(bot: Bot, message: Message, files: list[Path],
+                              caption: str) -> None:
+    """Send albums in Telegram's max-10 batches without silently dropping items."""
+    if not files:
+        return
+    media = [_input_media(path, caption if index == 0 else "")
+             for index, path in enumerate(files)]
+    force_document = len(media) > 1 and any(
+        isinstance(item, InputMediaDocument) for item in media)
+    if force_document:
+        media = [InputMediaDocument(
+            media=FSInputFile(path), caption=caption if index == 0 else None,
+            parse_mode=None)
+            for index, path in enumerate(files)]
+    if len(media) == 1:
+        await _send_single_media(bot, message, files[0], caption)
+        return
+
+    for start in range(0, len(media), _ALBUM_BATCH_SIZE):
+        batch = media[start:start + _ALBUM_BATCH_SIZE]
+        if len(batch) == 1:
+            await _send_single_media(
+                bot, message, files[start], caption if start == 0 else "",
+                force_document=force_document)
+        else:
+            await bot.send_media_group(
+                chat_id=message.chat.id,
+                media=batch,
+                reply_to_message_id=message.message_id,
+            )
 
 
 def _extractor_order(url: str) -> tuple[str, str, str]:
@@ -95,13 +158,13 @@ def _classify_failure(detail: str, *, timed_out: bool = False) -> str:
         "audience restriction", "audience-restricted",
     )):
         return "audience-restricted"
-    if any(token in value for token in ("private", "not found", "404", "no results", "unavailable")):
-        return "unavailable"
     if any(token in value for token in (
-        "login", "logged-in", "logged in", "authentication", "unauthorized",
+        "private", "login", "logged-in", "logged in", "authentication", "unauthorized",
         "401", "403", "checkpoint", "cookie", "empty media response",
     )):
         return "login-required"
+    if any(token in value for token in ("not found", "404", "no results", "unavailable")):
+        return "unavailable"
     return "extractor-error"
 
 
@@ -260,11 +323,10 @@ async def _download_instagram_media(
     *,
     allow_operator_cookies: bool,
 ) -> tuple[list[Path], str, list[_ExtractorAttempt]]:
-    """Try anonymous extractors first; retry with owner cookies only for login walls."""
+    """Try public extractors first; use the owner's session only for gated posts."""
     env = _download_env(root)
     order = _extractor_order(url)
     attempts: list[_ExtractorAttempt] = []
-    cookie_data = _cookie_file_bytes() if allow_operator_cookies else None
 
     for extractor in order:
         attempt = await _run_extractor(
@@ -273,26 +335,34 @@ async def _download_instagram_media(
         if attempt.category == "ok":
             return list(attempt.files), "ok", attempts
         _log_attempt(attempt)
-        # Another request will not help a hard rate limit, an explicitly
-        # audience-restricted post, or a clearly missing/private post.
-        if attempt.category in {"rate-limited", "audience-restricted", "unavailable"}:
+        # Do not probe other anonymous endpoints after an explicit audience gate
+        # or rate limit. An authorized owner session may be retried below, but a
+        # genuinely missing post is never treated as something to work around.
+        if attempt.category in {"rate-limited", "audience-restricted"}:
             break
 
-    if (
-        cookie_data is not None
-        and any(attempt.category == "login-required" for attempt in attempts)
-        and not any(attempt.category in {
-            "rate-limited", "audience-restricted", "unavailable",
-        } for attempt in attempts)
-    ):
-        cookie_path = _write_cookie_file(root, cookie_data)
-        extractor = order[0]
-        attempt = await _run_extractor(
-            extractor, url, root / extractor / "owner-session", env, cookie_path)
-        attempts.append(attempt)
-        if attempt.category == "ok":
-            return list(attempt.files), "ok", attempts
-        _log_attempt(attempt)
+    access_gated = any(attempt.category in {"login-required", "audience-restricted"}
+                       for attempt in attempts)
+    hard_blocked = any(attempt.category in {"rate-limited", "unavailable"}
+                       for attempt in attempts)
+    if allow_operator_cookies and access_gated and not hard_blocked:
+        cookie_data = _cookie_file_bytes()
+        if cookie_data is not None:
+            cookie_path = _write_cookie_file(root, cookie_data)
+            # Both established extractors get a chance with the same authorized
+            # session. parth-dl is deliberately anonymous-only.
+            for extractor in order:
+                if extractor == "parth-dl":
+                    continue
+                attempt = await _run_extractor(
+                    extractor, url, root / extractor / "authorized-session",
+                    env, cookie_path)
+                attempts.append(attempt)
+                if attempt.category == "ok":
+                    return list(attempt.files), "ok", attempts
+                _log_attempt(attempt)
+                if attempt.category == "rate-limited":
+                    break
 
     if attempts:
         # Prefer a clear auth/rate-limit explanation over a generic extractor error.
@@ -338,8 +408,9 @@ async def handle_instagram_message(message: Message, bot: Bot) -> bool:
     try:
         with tempfile.TemporaryDirectory(prefix="armando-instagram-") as tmp:
             root = Path(tmp)
-            files, failure, _attempts = await _download_instagram_media(
-                url, root, allow_operator_cookies=_is_owner_private_chat(message))
+            async with _DOWNLOAD_SEMAPHORE:
+                files, failure, _attempts = await _download_instagram_media(
+                    url, root, allow_operator_cookies=_is_owner_private_chat(message))
             if not files:
                 if failure == "rate-limited":
                     notice = (
@@ -348,9 +419,10 @@ async def handle_instagram_message(message: Message, bot: Bot) -> bool:
                     )
                 elif failure == "audience-restricted":
                     notice = (
-                        "⚠️ اینستاگرام می‌گوید این محتوا برای همه قابل‌مشاهده نیست؛ "
-                        "ممکن است تنظیمات مخاطب، سن یا منطقه دخیل باشد. "
-                        "استخراج‌گر بی‌کوکیِ دیگری این محدودیت را تضمینی رفع نمی‌کند."
+                        "⚠️ اینستاگرام دسترسی این محتوا را بر اساس مخاطب، سن یا منطقه محدود کرده است. "
+                        "فقط حسابی که مجاز به دیدن پست است می‌تواند کمک کند؛ نشست امنِ تنظیم‌شدهٔ مالک "
+                        "ربات فقط در گفت‌وگوی خصوصی همان مالک استفاده می‌شود. این محدودیت را نمی‌توان "
+                        "به‌طور تضمینی دور زد."
                     )
                 elif failure == "login-required":
                     notice = (
@@ -379,34 +451,8 @@ async def handle_instagram_message(message: Message, bot: Bot) -> bool:
                     "❌ حجم رسانه از سقف ارسال ربات در تلگرام بیشتر است.")
                 return True
 
-            caption = "📥 دریافت از پیوند عمومی اینستاگرام"
-            media = [_input_media(path, caption if index == 0 else "")
-                     for index, path in enumerate(files)]
-            if len(media) > 1 and any(isinstance(item, InputMediaDocument) for item in media):
-                # Telegram albums accept documents only when every item is a
-                # document; keep mixed/unusual Instagram formats transferable.
-                media = [InputMediaDocument(
-                    media=FSInputFile(path), caption=caption if index == 0 else None,
-                    parse_mode=None)
-                    for index, path in enumerate(files)]
-            if len(media) == 1:
-                item = media[0]
-                if isinstance(item, InputMediaPhoto):
-                    await bot.send_photo(
-                        chat_id=message.chat.id, photo=item.media, caption=caption,
-                        reply_to_message_id=message.message_id, parse_mode=None)
-                elif isinstance(item, InputMediaVideo):
-                    await bot.send_video(
-                        chat_id=message.chat.id, video=item.media, caption=caption,
-                        reply_to_message_id=message.message_id, parse_mode=None)
-                else:
-                    await bot.send_document(
-                        chat_id=message.chat.id, document=item.media, caption=caption,
-                        reply_to_message_id=message.message_id, parse_mode=None)
-            else:
-                await bot.send_media_group(
-                    chat_id=message.chat.id, media=media,
-                    reply_to_message_id=message.message_id)
+            caption = "دانلود شده توسط آرماندو آلخاندرو پرز"
+            await _send_media_batches(bot, message, files, caption)
             return True
     except FileNotFoundError:
         await _send_notice(
